@@ -11,6 +11,7 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 const DEFAULT_OPTS = {
   // How long a WAITER blocks before giving up. A legitimate Codex turn can run 3-10 min (the
@@ -68,6 +69,20 @@ function hostId() {
   return process.env.COMPUTERNAME || process.env.HOSTNAME || 'localhost';
 }
 
+// Refresh the owner.json timestamp so stale detection does not reclaim an active long turn.
+// Fire-and-forget: errors must NOT propagate to the caller.
+async function heartbeat(lockDirPath, token) {
+  try {
+    const meta = await readLockMeta(lockDirPath);
+    // Only refresh if the token still matches — we still own this lock.
+    if (!meta || meta.token !== token) return;
+    const updated = { ...meta, heartbeatAt: new Date().toISOString() };
+    await fsp.writeFile(path.join(lockDirPath, 'owner.json'), JSON.stringify(updated), 'utf8');
+  } catch {
+    /* heartbeat errors are silently swallowed — never propagate */
+  }
+}
+
 // Acquire the lock. Returns a release() function. Throws on timeout.
 async function acquire(lockDirPath, opts = {}) {
   const o = { ...DEFAULT_OPTS, ...opts };
@@ -76,8 +91,15 @@ async function acquire(lockDirPath, opts = {}) {
   for (;;) {
     try {
       await fsp.mkdir(lockDirPath, { recursive: false });
-      // We own it. Stamp owner metadata for stale detection.
-      const meta = { pid: process.pid, host: hostId(), acquiredAt: new Date().toISOString() };
+      // We own it. Stamp owner metadata for stale detection. Include a unique token so release()
+      // can verify it still owns the lock (guards against stale-reclaim races).
+      const token = crypto.randomUUID();
+      const meta = {
+        pid: process.pid,
+        host: hostId(),
+        acquiredAt: new Date().toISOString(),
+        token,
+      };
       try {
         await fsp.writeFile(path.join(lockDirPath, 'owner.json'), JSON.stringify(meta), 'utf8');
       } catch {
@@ -87,10 +109,20 @@ async function acquire(lockDirPath, opts = {}) {
       return async function release() {
         if (released) return;
         released = true;
+        // Only remove the lock dir if our token is still present. If a stale reclaim raced in
+        // and another process re-acquired the lock, we must NOT delete their lock.
         try {
+          const current = await readLockMeta(lockDirPath);
+          if (current && current.token !== token) {
+            process.stderr.write(
+              `[codex-bridge lock] release skipped: token mismatch on ${lockDirPath} ` +
+                `(expected ${token}, found ${current.token}) — lock was reclaimed\n`
+            );
+            return;
+          }
           await fsp.rm(lockDirPath, { recursive: true, force: true });
         } catch {
-          /* ignore */
+          /* ignore — either already gone or unreadable; both are fine */
         }
       };
     } catch (err) {
@@ -116,4 +148,4 @@ function ensureStateDirSync(stateDirPath) {
   fs.mkdirSync(stateDirPath, { recursive: true });
 }
 
-module.exports = { acquire, ensureStateDirSync, DEFAULT_OPTS };
+module.exports = { acquire, ensureStateDirSync, heartbeat, DEFAULT_OPTS };

@@ -30,9 +30,28 @@ function makeBackend() {
   // Test seam: CODEX_BRIDGE_BACKEND can point at a module exporting `createBackend()` so the
   // MCP server can be driven over stdio against a deterministic stub (no real Codex). Production
   // never sets this and uses the native `codex mcp-server` child.
+  //
+  // MINOR-15: guard this override so it cannot be used in production to load arbitrary modules.
+  // Allow only when NODE_ENV !== 'production' OR when the value is an absolute path. Reject
+  // relative paths and bare package names in production to prevent arbitrary module injection.
   const override = process.env.CODEX_BRIDGE_BACKEND;
   if (override) {
-    elog('using injected backend from', override);
+    const isProduction = process.env.NODE_ENV === 'production';
+    const isAbsolute =
+      override.startsWith('/') ||
+      (process.platform === 'win32' && /^[A-Za-z]:[/\\]/.test(override));
+    if (isProduction && !isAbsolute) {
+      const e = new Error(
+        `CODEX_BRIDGE_BACKEND is set to a non-absolute path ('${override}') in production. ` +
+          'Only absolute paths are allowed in NODE_ENV=production to prevent arbitrary module loading.'
+      );
+      e.code = 'UNSAFE_BACKEND_OVERRIDE';
+      throw e;
+    }
+    process.stderr.write(
+      `[codex-bridge] WARNING: CODEX_BRIDGE_BACKEND override active — loading '${override}'. ` +
+        'This is a test seam; do not use in production with untrusted paths.\n'
+    );
     const mod = require(override);
     return mod.createBackend();
   }
@@ -72,7 +91,24 @@ async function main() {
           .describe(
             'Stable per-conversation key (letters, digits, ., _, -). Keep constant for the whole exchange.'
           ),
-        message: z.string().min(1).describe('The message to send to Codex this turn.'),
+        // MAJOR-10: cap message size to prevent memory/disk exhaustion.
+        message: z
+          .string()
+          .min(1)
+          .max(100000)
+          .describe('The message to send to Codex this turn.'),
+        // working_dir: optional project path so Codex can read files directly without needing
+        // file contents pasted in. Set to the project root on the first turn; ignored on resume
+        // (cwd is set at session start and cannot change mid-thread).
+        working_dir: z
+          .string()
+          .max(500)
+          .optional()
+          .describe(
+            'Optional working directory for Codex. Set to the project path so Codex can read ' +
+              'files directly without needing file contents pasted in. Only used on the first turn ' +
+              '(session start); ignored on subsequent turns of the same conversation.'
+          ),
       },
       outputSchema: {
         reply: z.string().describe('Codex reply text, verbatim.'),
@@ -80,9 +116,9 @@ async function main() {
         turn: z.number().int().describe('1-based turn number within this conversation.'),
       },
     },
-    async ({ conversation_id, message }) => {
+    async ({ conversation_id, message, working_dir }) => {
       try {
-        const out = await bridge.turn(conversation_id, message);
+        const out = await bridge.turn(conversation_id, message, { working_dir });
         return {
           // structuredContent is the fidelity-bearing channel (design §2: fidelity from tool
           // result, not relay prose). Also mirror to a text block for clients that ignore it.

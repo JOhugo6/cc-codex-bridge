@@ -7,6 +7,18 @@
 const lock = require('./lock');
 const store = require('./store');
 const paths = require('./paths');
+const fsp = require('node:fs/promises');
+
+// Read the owner metadata from a lock dir (mirrors lock.js#readLockMeta without re-exporting it).
+async function readLockMeta(dir) {
+  const path = require('node:path');
+  try {
+    const raw = await fsp.readFile(path.join(dir, 'owner.json'), 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -26,16 +38,45 @@ class CodexBridge {
 
   // Deterministic single turn. Throws LOUDLY on any failure to create/resume a session — never
   // silently starts fresh (design §4.1 step 4, §2).
-  async turn(conversationId, message) {
+  // opts.working_dir — passed as extra.cwd to backend.startSession() on the first turn only.
+  // Falls back to process.cwd() (the existing default in the backend) when not provided.
+  async turn(conversationId, message, opts = {}) {
     paths.assertSafeConversationId(conversationId);
     if (typeof message !== 'string' || message.length === 0) {
       const e = new Error('message must be a non-empty string');
       e.code = 'INVALID_MESSAGE';
       throw e;
     }
+    // MAJOR-10 (defence-in-depth): reject oversized messages before touching disk or the backend.
+    // The primary limit is the Zod maxLength(100000) in index.js; this guard covers direct callers.
+    const MAX_MESSAGE_LENGTH = 100000;
+    if (message.length > MAX_MESSAGE_LENGTH) {
+      const e = new Error(
+        `message exceeds maximum length of ${MAX_MESSAGE_LENGTH} characters (got ${message.length}).`
+      );
+      e.code = 'MESSAGE_TOO_LARGE';
+      throw e;
+    }
 
     lock.ensureStateDirSync(paths.stateDir());
-    const release = await lock.acquire(paths.lockDir(conversationId), this.lockOpts);
+    const lockDirPath = paths.lockDir(conversationId);
+    const release = await lock.acquire(lockDirPath, this.lockOpts);
+    // Start a heartbeat so stale detection does not reclaim the lock during a long Codex turn.
+    // Fire-and-forget: errors in the heartbeat must not propagate.
+    const HEARTBEAT_INTERVAL_MS = 30000;
+    let heartbeatTimer = null;
+    const startHeartbeat = (token) => {
+      heartbeatTimer = setInterval(() => {
+        lock.heartbeat(lockDirPath, token).catch(() => {});
+      }, HEARTBEAT_INTERVAL_MS);
+      if (heartbeatTimer.unref) heartbeatTimer.unref(); // don't keep the event loop alive
+    };
+    const stopHeartbeat = () => {
+      if (heartbeatTimer !== null) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+    };
     try {
       const prior = await store.loadState(conversationId); // throws on corrupt state
       const isNew = !prior || !prior.thread_id;
@@ -53,8 +94,14 @@ class CodexBridge {
 
       let result;
       try {
+        // Read the token written into owner.json so heartbeat can verify ownership.
+        const lockMeta = await readLockMeta(lockDirPath);
+        if (lockMeta && lockMeta.token) startHeartbeat(lockMeta.token);
+
         if (isNew) {
-          result = await this.backend.startSession(message);
+          // Pass working_dir as extra.cwd so Codex can read project files directly.
+          const extra = opts.working_dir ? { cwd: opts.working_dir } : {};
+          result = await this.backend.startSession(message, extra);
         } else {
           result = await this.backend.continueSession(prior.thread_id, message);
         }
@@ -84,19 +131,34 @@ class CodexBridge {
       const threadId = result.threadId;
       const reply = typeof result.content === 'string' ? result.content : String(result.content);
 
-      if (!threadId) {
-        const e = new Error('Codex did not return a thread_id; cannot guarantee session continuity.');
-        e.code = 'NO_THREAD_ID';
-        throw e;
-      }
-      // If we were resuming, the thread_id must not silently change underneath us.
-      if (!isNew && prior.thread_id && threadId !== prior.thread_id) {
-        const e = new Error(
-          `Codex thread_id changed mid-conversation for '${conversationId}' ` +
-            `(${prior.thread_id} -> ${threadId}). Treating as lost session.`
-        );
-        e.code = 'THREAD_ID_DRIFT';
-        throw e;
+      // MINOR-13: wrap post-call validation so any validation error also gets an 'error' transcript
+      // entry before being rethrown — same pattern as the backend-call failure path above.
+      try {
+        if (!threadId) {
+          const e = new Error('Codex did not return a thread_id; cannot guarantee session continuity.');
+          e.code = 'NO_THREAD_ID';
+          throw e;
+        }
+        // If we were resuming, the thread_id must not silently change underneath us.
+        if (!isNew && prior.thread_id && threadId !== prior.thread_id) {
+          const e = new Error(
+            `Codex thread_id changed mid-conversation for '${conversationId}' ` +
+              `(${prior.thread_id} -> ${threadId}). Treating as lost session.`
+          );
+          e.code = 'THREAD_ID_DRIFT';
+          throw e;
+        }
+      } catch (validationErr) {
+        await store.appendTranscript(conversationId, {
+          ts: nowIso(),
+          direction: 'error',
+          turn: turnNumber,
+          thread_id: prior ? prior.thread_id || null : null,
+          error: validationErr && validationErr.message,
+          code: validationErr && validationErr.code,
+          provider: this.provider,
+        });
+        throw validationErr;
       }
 
       const newState = {
@@ -119,6 +181,7 @@ class CodexBridge {
 
       return { reply, thread_id: threadId, turn: turnNumber };
     } finally {
+      stopHeartbeat();
       await release();
     }
   }

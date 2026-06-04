@@ -74,14 +74,24 @@ if ($PSCmdlet.ShouldProcess($bridgeDst, 'Copy bridge source')) {
   Write-Host "  copied."
 }
 
-# ── step 2: npm install ───────────────────────────────────────────────────────
+# ── step 2: npm ci (or npm install fallback) ─────────────────────────────────
 Write-Host ""
-Write-Host "Step 2/4  Running npm install in $bridgeDst ..."
-if ($PSCmdlet.ShouldProcess($bridgeDst, 'npm install')) {
+Write-Host "Step 2/4  Installing npm dependencies in $bridgeDst ..."
+if ($PSCmdlet.ShouldProcess($bridgeDst, 'npm ci')) {
   Push-Location $bridgeDst
   try {
-    npm install --prefer-offline 2>&1 | Where-Object { $_ -notmatch '^npm warn' } | Write-Host
-    if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
+    # Use `npm ci` when a lockfile is present for a faster, fully reproducible install.
+    # Fall back to `npm install` only when no lockfile exists (e.g. first run from source
+    # without a committed lockfile).
+    if (Test-Path -LiteralPath (Join-Path $bridgeDst 'package-lock.json')) {
+      Write-Host "  lockfile found — using npm ci (reproducible install)"
+      npm ci 2>&1 | Where-Object { $_ -notmatch '^npm warn' } | Write-Host
+      if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+    } else {
+      Write-Host "  no lockfile — using npm install"
+      npm install --prefer-offline 2>&1 | Where-Object { $_ -notmatch '^npm warn' } | Write-Host
+      if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
+    }
   } finally {
     Pop-Location
   }
@@ -94,10 +104,13 @@ Write-Host "Step 3/4  Generating codex-peer.md ..."
 if ($PSCmdlet.ShouldProcess($agentDst, 'Write codex-peer.md')) {
   New-Item -ItemType Directory -Force -Path $agentsDir | Out-Null
 
-  # Substitute {{BRIDGE_DIR}} with the absolute path, forward slashes (YAML requirement).
+  # Resolve node.exe absolute path (needed for spaces-in-path safety in the YAML args).
+  $nodeExe     = (Get-Command node -ErrorAction Stop).Source
+  # Forward slashes for both substitutions (YAML requirement; backslashes cause silent parse failures).
   $bridgeDirFwd = $bridgeDst.Replace('\', '/')
+  $nodeExeFwd   = $nodeExe.Replace('\', '/')
   $tpl = Get-Content $agentTpl -Raw -Encoding UTF8
-  $out = $tpl.Replace('{{BRIDGE_DIR}}', $bridgeDirFwd)
+  $out = $tpl.Replace('{{BRIDGE_DIR}}', $bridgeDirFwd).Replace('{{NODE_EXE}}', $nodeExeFwd)
 
   # Write UTF-8 without BOM (PowerShell default in pwsh 7).
   [System.IO.File]::WriteAllText($agentDst, $out, [System.Text.UTF8Encoding]::new($false))

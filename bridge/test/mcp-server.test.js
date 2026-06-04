@@ -142,3 +142,42 @@ test('invalid conversation_id is rejected by input validation', async (t) => {
   assert.match(res.content[0].text, /validation|conversation_id|pattern/i);
   assert.ok(!res.structuredContent, 'no structuredContent on validation failure');
 });
+
+test('working_dir: tool schema lists working_dir as optional and a turn with it succeeds', async (t) => {
+  const dir = freshDir();
+  const { client } = await startClient({ stateDir: dir });
+  t.after(async () => {
+    await client.close();
+    await fsp.rm(dir, { recursive: true, force: true });
+  });
+
+  // 1. Verify schema: working_dir is in properties but NOT in required.
+  const { tools } = await client.listTools();
+  const tool = tools.find((x) => x.name === 'codex_turn');
+  assert.ok(tool, 'codex_turn must exist');
+  const props = tool.inputSchema.properties;
+  assert.ok(props.working_dir, 'working_dir must appear in input schema properties');
+  const required = tool.inputSchema.required || [];
+  assert.ok(!required.includes('working_dir'), 'working_dir must NOT be required');
+
+  // 2. A turn with working_dir succeeds and returns the normal structuredContent shape.
+  const res = await client.callTool({
+    name: 'codex_turn',
+    arguments: {
+      conversation_id: 'mcp-wdir-1',
+      message: 'hello with working_dir',
+      working_dir: '/tmp/my-project',
+    },
+  });
+  assert.notEqual(res.isError, true, 'turn with working_dir must not be an error');
+  assert.ok(res.structuredContent, 'has structuredContent');
+  assert.equal(res.structuredContent.turn, 1);
+  assert.ok(res.structuredContent.thread_id);
+
+  // 3. A turn WITHOUT working_dir also succeeds (it is optional).
+  const res2 = await client.callTool({
+    name: 'codex_turn',
+    arguments: { conversation_id: 'mcp-wdir-2', message: 'hello without working_dir' },
+  });
+  assert.notEqual(res2.isError, true, 'turn without working_dir must not be an error');
+});

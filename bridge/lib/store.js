@@ -20,6 +20,14 @@ async function loadState(conversationId) {
   try {
     const st = JSON.parse(raw);
     if (!st || typeof st !== 'object') throw new Error('state is not an object');
+    // Validate required fields have correct types. A valid-JSON-but-wrong-type state would
+    // propagate silently and cause subtle corruption (e.g. numeric thread_id, string turn).
+    if (typeof st.thread_id !== 'string' || st.thread_id.length === 0) {
+      throw new Error(`thread_id must be a non-empty string, got ${JSON.stringify(st.thread_id)}`);
+    }
+    if (!Number.isInteger(st.turn) || st.turn < 1) {
+      throw new Error(`turn must be a positive integer (>=1), got ${JSON.stringify(st.turn)}`);
+    }
     return st;
   } catch (err) {
     const e = new Error(

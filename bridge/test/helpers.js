@@ -39,8 +39,8 @@ class FakeBackend {
     return fallback;
   }
 
-  async startSession(prompt) {
-    this.calls.push({ kind: 'start', prompt });
+  async startSession(prompt, extra = {}) {
+    this.calls.push({ kind: 'start', prompt, extra });
     if (this.startDelayMs) await new Promise((r) => setTimeout(r, this.startDelayMs));
     if (this.failStart) {
       const e = new Error('fake: cannot create session');

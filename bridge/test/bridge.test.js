@@ -236,3 +236,185 @@ test('invalid conversation_id is rejected before any backend call', async (t) =>
   await assert.rejects(() => bridge.turn('a/b', 'x'), (e) => e.code === 'INVALID_CONVERSATION_ID');
   assert.equal(backend.calls.length, 0);
 });
+
+// MAJOR-9: state with correct JSON structure but wrong field types must be CORRUPT_STATE
+test('state with thread_id as number is CORRUPT_STATE (not silently treated as new)', async (t) => {
+  const env = freshStateDir();
+  t.after(() => env.cleanup());
+
+  // Write a structurally valid JSON object, but with wrong types.
+  await fsp.writeFile(
+    paths.stateFile('conv-wrong-types'),
+    JSON.stringify({ thread_id: 12345, turn: 'one', provider: 'codex' }),
+    'utf8'
+  );
+
+  const backend = new FakeBackend();
+  const bridge = new CodexBridge(backend);
+
+  await assert.rejects(
+    () => bridge.turn('conv-wrong-types', 'hello'),
+    (err) => {
+      assert.equal(err.code, 'CORRUPT_STATE', `expected CORRUPT_STATE, got ${err.code}: ${err.message}`);
+      return true;
+    }
+  );
+  // Backend must never be called when state is corrupt.
+  assert.equal(backend.calls.length, 0);
+});
+
+test('state with turn as string is CORRUPT_STATE', async (t) => {
+  const env = freshStateDir();
+  t.after(() => env.cleanup());
+
+  await fsp.writeFile(
+    paths.stateFile('conv-turn-string'),
+    JSON.stringify({ thread_id: 'tid-abc', turn: 'one', provider: 'codex' }),
+    'utf8'
+  );
+
+  const backend = new FakeBackend();
+  const bridge = new CodexBridge(backend);
+
+  await assert.rejects(
+    () => bridge.turn('conv-turn-string', 'hello'),
+    (err) => {
+      assert.equal(err.code, 'CORRUPT_STATE');
+      return true;
+    }
+  );
+  assert.equal(backend.calls.length, 0);
+});
+
+test('state with turn = 0 (non-positive) is CORRUPT_STATE', async (t) => {
+  const env = freshStateDir();
+  t.after(() => env.cleanup());
+
+  await fsp.writeFile(
+    paths.stateFile('conv-turn-zero'),
+    JSON.stringify({ thread_id: 'tid-abc', turn: 0, provider: 'codex' }),
+    'utf8'
+  );
+
+  const backend = new FakeBackend();
+  const bridge = new CodexBridge(backend);
+
+  await assert.rejects(
+    () => bridge.turn('conv-turn-zero', 'hello'),
+    (err) => {
+      assert.equal(err.code, 'CORRUPT_STATE');
+      return true;
+    }
+  );
+  assert.equal(backend.calls.length, 0);
+});
+
+// MINOR-14: Windows reserved basenames must be rejected
+test('Windows reserved names are rejected as conversation_id', async (t) => {
+  const env = freshStateDir();
+  t.after(() => env.cleanup());
+
+  const backend = new FakeBackend();
+  const bridge = new CodexBridge(backend);
+
+  const reserved = ['CON', 'NUL', 'PRN', 'AUX', 'COM1', 'COM9', 'LPT1', 'LPT9'];
+  for (const name of reserved) {
+    await assert.rejects(
+      () => bridge.turn(name, 'x'),
+      (err) => {
+        assert.equal(
+          err.code,
+          'INVALID_CONVERSATION_ID',
+          `expected INVALID_CONVERSATION_ID for '${name}', got ${err.code}`
+        );
+        return true;
+      }
+    );
+    // Case-insensitive check
+    await assert.rejects(
+      () => bridge.turn(name.toLowerCase(), 'x'),
+      (err) => err.code === 'INVALID_CONVERSATION_ID'
+    );
+  }
+  // Backend must never be called for any reserved name.
+  assert.equal(backend.calls.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// working_dir parameter (new feature)
+// ---------------------------------------------------------------------------
+test('working_dir is passed as extra.cwd to backend.startSession on first turn', async (t) => {
+  const env = freshStateDir();
+  t.after(() => env.cleanup());
+
+  const backend = new FakeBackend();
+  const bridge = new CodexBridge(backend);
+
+  await bridge.turn('conv-wdir', 'hello', { working_dir: '/my/project' });
+
+  assert.equal(backend.calls.length, 1);
+  assert.equal(backend.calls[0].kind, 'start');
+  assert.deepEqual(backend.calls[0].extra, { cwd: '/my/project' });
+});
+
+test('working_dir is NOT forwarded on subsequent turns (cwd is set at session start only)', async (t) => {
+  const env = freshStateDir();
+  t.after(() => env.cleanup());
+
+  const backend = new FakeBackend();
+  const bridge = new CodexBridge(backend);
+
+  await bridge.turn('conv-wdir2', 'first', { working_dir: '/my/project' });
+  // Second turn: bridge calls continueSession, not startSession — working_dir is not passed.
+  await bridge.turn('conv-wdir2', 'second', { working_dir: '/my/project' });
+
+  assert.equal(backend.calls[1].kind, 'reply');
+  // continueSession does not have an extra param — just threadId + prompt.
+  assert.ok(!backend.calls[1].extra, 'continueSession must not receive extra');
+});
+
+test('turn without working_dir uses empty extra (no cwd injected)', async (t) => {
+  const env = freshStateDir();
+  t.after(() => env.cleanup());
+
+  const backend = new FakeBackend();
+  const bridge = new CodexBridge(backend);
+
+  await bridge.turn('conv-no-wdir', 'hello');
+
+  assert.equal(backend.calls[0].kind, 'start');
+  assert.deepEqual(backend.calls[0].extra, {}, 'extra must be empty when working_dir is omitted');
+});
+
+// ---------------------------------------------------------------------------
+// MAJOR-10: message size limit
+// ---------------------------------------------------------------------------
+test('MAJOR-10: oversized message is rejected before backend call (MESSAGE_TOO_LARGE)', async (t) => {
+  const env = freshStateDir();
+  t.after(() => env.cleanup());
+
+  const backend = new FakeBackend();
+  const bridge = new CodexBridge(backend);
+
+  const bigMessage = 'x'.repeat(100001);
+  await assert.rejects(
+    () => bridge.turn('conv-big', bigMessage),
+    (err) => {
+      assert.equal(err.code, 'MESSAGE_TOO_LARGE');
+      return true;
+    }
+  );
+  assert.equal(backend.calls.length, 0, 'backend must not be called for oversized message');
+});
+
+test('MAJOR-10: message exactly at the limit (100000 chars) is accepted', async (t) => {
+  const env = freshStateDir();
+  t.after(() => env.cleanup());
+
+  const backend = new FakeBackend();
+  const bridge = new CodexBridge(backend);
+
+  const maxMessage = 'x'.repeat(100000);
+  const r = await bridge.turn('conv-maxlen', maxMessage);
+  assert.equal(r.turn, 1, 'message at exactly max length must succeed');
+});

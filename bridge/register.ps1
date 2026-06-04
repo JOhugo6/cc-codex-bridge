@@ -7,10 +7,11 @@
   Idempotent: removes any existing 'codex_bridge' user-scope registration, then adds it fresh.
   The resulting MCP tool surfaces to agents as:  mcp__codex_bridge__codex_turn
 
-  Windows launch detail: Node is invoked via cmd.exe (`cmd /c node "<abs index.js>"`) using an
-  ABSOLUTE path, because user-scope config does not expand ~ / $HOME, and a bare node spawn of a
-  relative path is not portable. (The codex CLI shim itself is launched by the bridge at runtime,
-  not here.)
+  Windows launch detail: Node is invoked via cmd.exe (`cmd /c "<abs node.exe>" "<abs index.js>"`)
+  using ABSOLUTE, fully-quoted paths for both executables, so the command survives installation
+  directories that contain spaces (e.g. "C:\Program Files\nodejs\node.exe"). The absolute path to
+  node.exe is resolved at registration time via (Get-Command node).Source. (The codex CLI shim
+  itself is launched by the bridge at runtime, not here.)
 
 .PARAMETER WhatIf
   Show the commands without executing them.
@@ -30,6 +31,14 @@ if (-not (Test-Path -LiteralPath $indexJs)) {
   throw "index.js not found at '$indexJs'. Run register.ps1 from inside the codex-bridge directory."
 }
 
+# Resolve the absolute path to node.exe so the command survives paths with spaces
+# (e.g. "C:\Program Files\nodejs\node.exe").
+$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+if (-not $nodeCmd) {
+  throw "node.exe was not found on PATH. Install Node.js and ensure 'node' is on PATH."
+}
+$nodeExe = $nodeCmd.Source
+
 # Verify claude CLI is available.
 $claude = Get-Command claude -ErrorAction SilentlyContinue
 if (-not $claude) {
@@ -38,6 +47,7 @@ if (-not $claude) {
 
 Write-Host "codex-bridge dir : $bridgeDir"
 Write-Host "index.js         : $indexJs"
+Write-Host "node.exe         : $nodeExe"
 Write-Host "server name      : $ServerName"
 Write-Host ""
 
@@ -47,7 +57,9 @@ if ($PSCmdlet.ShouldProcess($ServerName, "claude mcp remove --scope user")) {
   try { & claude mcp remove --scope user $ServerName 2>&1 | Out-Host } catch { Write-Host "  (none to remove)" }
 }
 
-# 2) Add fresh. stdio transport, user scope. Launch node via cmd.exe with an absolute path.
+# 2) Add fresh. stdio transport, user scope.
+#    Launch node via cmd.exe with ABSOLUTE, fully-quoted paths for both node.exe and index.js,
+#    so the command survives installation directories that contain spaces.
 #    Everything after `--` is the launch command for the stdio server.
 Write-Host ""
 Write-Host "Adding user-scope '$ServerName'..."
@@ -57,7 +69,7 @@ $addArgs = @(
   '--scope', 'user',
   $ServerName,
   '--',
-  'cmd', '/c', 'node', $indexJs
+  'cmd', '/c', $nodeExe, $indexJs
 )
 
 if ($PSCmdlet.ShouldProcess($ServerName, "claude mcp add (stdio, user)")) {
@@ -72,4 +84,4 @@ Write-Host "Done. Verifying registration..."
 Write-Host ""
 Write-Host "The tool will surface to agents as:  mcp__${ServerName}__codex_turn"
 Write-Host "Exact add line used:"
-Write-Host ("  claude mcp add --transport stdio --scope user {0} -- cmd /c node ""{1}""" -f $ServerName, $indexJs)
+Write-Host ("  claude mcp add --transport stdio --scope user {0} -- cmd /c ""{1}"" ""{2}""" -f $ServerName, $nodeExe, $indexJs)
