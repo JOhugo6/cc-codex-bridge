@@ -103,7 +103,15 @@ npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" run smoke
 ```powershell
 git pull
 .\install.ps1   # idempotent, safe to re-run
-# restart Claude Code
+```
+
+Then **restart Claude Code** — the agent definition (`codex-peer`) is cached at session start.
+Without a restart the relay agent keeps running the old version regardless of `install.ps1`.
+
+Verify after restart:
+```powershell
+claude mcp list   # codex_bridge must show ✓ Connected
+npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" test   # 47/47 pass
 ```
 
 ## Docs

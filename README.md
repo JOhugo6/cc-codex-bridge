@@ -103,7 +103,15 @@ npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" run smoke
 ```powershell
 git pull
 .\install.ps1   # idempotentní, bezpečné opakovaně spustit
-# restart Claude Code
+```
+
+Poté **restartuj Claude Code** — definice agentů (`codex-peer`) se cachují při startu session.
+Bez restartu bude relay agent stále používat starou verzi bez ohledu na `install.ps1`.
+
+Ověř po restartu:
+```powershell
+claude mcp list   # codex_bridge musí ukazovat ✓ Connected
+npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" test   # 47/47 pass
 ```
 
 ## Dokumentace
