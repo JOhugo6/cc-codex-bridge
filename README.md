@@ -1,30 +1,32 @@
+**Česky** | [English](README.en.md)
+
 # cc-codex-bridge
 
-Makes **OpenAI Codex CLI** an addressable member of a [Claude Code](https://claude.ai/code) team.
+Zapojí **OpenAI Codex CLI** jako adresovatelného člena [Claude Code](https://claude.ai/code) týmu.
 
-After installation you can send `SendMessage` to a `codex-peer` agent from any Claude Code team conversation and get a real Codex reply back — with full multi-turn memory kept alive across separate agent spawns.
+Po instalaci můžeš posílat `SendMessage` agentovi `codex-peer` z libovolné Claude Code týmové konverzace a dostávat skutečné Codex odpovědi zpět — s vícekolovým kontextem udržovaným přes samostatná spuštění agentů.
 
 ```
-Other Claude sub-agent
-  └─ SendMessage("CONV_ID: my-conv\nReview this diff…")
-       └─ codex-peer (thin relay, model: sonnet)
-            └─ codex_turn MCP tool
-                 └─ codex-bridge (deterministic Node server)
-                      └─ codex mcp-server (real Codex CLI)
-                           └─ ~/.claude/state/codex-bridge/my-conv.json  ← thread_id on disk
+Jiný Claude sub-agent
+  └─ SendMessage("CONV_ID: my-conv\nZkontroluj tento diff…")
+       └─ codex-peer (tenká slupka, model: sonnet)
+            └─ codex_turn MCP nástroj
+                 └─ codex-bridge (deterministický Node server)
+                      └─ codex mcp-server (nativní Codex CLI)
+                           └─ ~/.claude/state/codex-bridge/my-conv.json  ← thread_id na disku
 ```
 
-## Prerequisites
+## Prerekvizity
 
-| Tool | Minimum version | Notes |
+| Nástroj | Minimální verze | Poznámka |
 |---|---|---|
 | Node.js | v20 | `node --version` |
-| Claude Code CLI | current | `claude --version`, must be authenticated |
-| OpenAI Codex CLI | v0.133+ | `codex --version`, must be authenticated |
-| PowerShell | 7 (pwsh) | for install script |
-| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `=1` | set in your environment |
+| Claude Code CLI | aktuální | `claude --version`, musí být autentizováno |
+| OpenAI Codex CLI | v0.133+ | `codex --version`, musí být autentizováno |
+| PowerShell | 7 (pwsh) | pro install skript |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `=1` | nastavit v prostředí |
 
-## Install
+## Instalace
 
 ```powershell
 git clone https://github.com/JOhugo6/cc-codex-bridge
@@ -32,83 +34,83 @@ cd cc-codex-bridge
 .\install.ps1
 ```
 
-Then **restart Claude Code** (agent definitions are cached at session start).
+Poté **restartuj Claude Code** (definice agentů se cachují při startu session).
 
-The installer:
-1. Copies `bridge/` → `~/.claude/bridges/codex-bridge/`
-2. Runs `npm install`
-3. Substitutes your actual path into `agent/codex-peer.md.template` → `~/.claude/agents/codex-peer.md`
-4. Registers the MCP server at user scope (`claude mcp add --scope user codex_bridge`)
+Instalátor:
+1. Zkopíruje `bridge/` → `~/.claude/bridges/codex-bridge/`
+2. Spustí `npm install`
+3. Nahradí skutečnou cestu v `agent/codex-peer.md.template` → `~/.claude/agents/codex-peer.md`
+4. Zaregistruje MCP server na user scope (`claude mcp add --scope user codex_bridge`)
 
-Re-run `.\install.ps1` after pulling updates — it is idempotent.
+`.\install.ps1` lze opakovaně spouštět po pullnutí aktualizací — je idempotentní.
 
-## Usage
+## Použití
 
-Every message to `codex-peer` **must** start with a `CONV_ID:` line:
+Každá zpráva pro `codex-peer` **musí** začínat řádkem `CONV_ID:`:
 
 ```
 CONV_ID: my-project--review-01
-Please review the following diff and point out any bugs…
-<diff here>
+Zkontroluj prosím následující diff a ukaž na případné chyby…
+<diff zde>
 ```
 
-The `CONV_ID` is your stable key for the whole conversation — pick it once and reuse it on every message. The bridge keeps Codex's thread alive on disk under that key, so each fresh `codex-peer` spawn picks up right where the last one left off.
+`CONV_ID` je tvůj stabilní klíč pro celou konverzaci — zvol ho jednou a opakovaně ho používej v každé zprávě. Bridge udržuje Codex vlákno živé na disku pod tímto klíčem, takže každé čerstvě spuštěné `codex-peer` pokračuje přesně tam, kde skončilo poslední.
 
-### In a Claude Code team
+### V Claude Code týmu
 
 ```python
-# Example: orchestrator sends a message to codex-peer
+# Příklad: orchestrátor posílá zprávu codex-peer
 SendMessage(to="codex-peer", message="""
 CONV_ID: sprint42--arch-review
-We're designing a new caching layer. What are the trade-offs between
-write-through and write-back strategies for our use case?
+Navrhujeme novou caching vrstvu. Jaké jsou trade-offy mezi
+write-through a write-back strategiemi pro náš use case?
 """)
 ```
 
-Then later, in a fresh spawn:
+Poté, v čerstvě spuštěném session:
 
 ```python
 SendMessage(to="codex-peer", message="""
 CONV_ID: sprint42--arch-review
-Given the trade-offs you described, which would you recommend for a
-read-heavy workload with occasional burst writes?
+Na základě trade-offů, které jsi popsal, co bys doporučil pro
+read-heavy workload s občasnými burst writes?
 """)
 ```
 
-Codex will remember the earlier context because `CONV_ID` resolves to the same on-disk thread.
+Codex si pamatuje dřívější kontext, protože `CONV_ID` odkazuje na stejné on-disk vlákno.
 
-## Tests
+## Testy
 
 ```powershell
-# Unit + integration (no Codex required)
+# Unit + integration (nevyžaduje Codex)
 npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" test
 
-# Live smoke (requires authenticated Codex, ~30s)
+# Live smoke (vyžaduje autentizovaný Codex, ~30s)
 $env:CODEX_BRIDGE_LIVE = "1"
 npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" run smoke
 ```
 
-## Key design decisions
+## Klíčová designová rozhodnutí
 
-- **Thread continuity on disk, not in the LLM.** The relay agent holds no state. The bridge persists `thread_id` to `~/.claude/state/codex-bridge/<conv_id>.json` so it survives agent re-instantiation and context compaction.
-- **Hard-error on lost session.** A failed resume throws loudly — never silently starts a fresh session (which would be invisible amnesia).
-- **`model: sonnet` for the relay.** Haiku was unreliable about calling the tool vs. improvising its own answer. Sonnet follows the tool-call instruction reliably.
-- **`CONV_ID:` is operator-supplied.** The relay never derives the key — an LLM-guessed key would be non-deterministic and break cross-spawn continuity.
-- **v1 limitation:** one shared `codex mcp-server` process backs all conversations (thread-level isolation, not process-level). Read-only sandbox by default. Do not widen the sandbox without adding per-conversation process isolation.
+- **Kontinuita vlákna na disku, ne v LLM.** Relay agent nedrží žádný stav. Bridge persistuje `thread_id` do `~/.claude/state/codex-bridge/<conv_id>.json`, takže přežije re-instanciaci agenta a context compaction.
+- **Hard-error při ztrátě session.** Selhání obnovy vlákna vyhodí hlasitou chybu — nikdy tiše nezahájí novou session (to by byla neviditelná amnézie).
+- **`model: sonnet` pro relay.** Haiku byl nespolehlivý ohledně volání nástroje vs. improvizace vlastní odpovědi. Sonnet spolehlivě následuje instrukce pro tool call.
+- **`CONV_ID:` dodává operátor.** Relay klíč nikdy neodvozuje — LLM-hádaný klíč by byl nedeterministický a zlomil by cross-spawn kontinuitu.
+- **v1 limitace:** jeden sdílený `codex mcp-server` proces obsluhuje všechny konverzace (izolace na úrovni vlákna, ne procesu). Sandbox je read-only. Nerozsiruj sandbox bez přidání per-conversation process isolation.
 
-## Updating
+## Aktualizace
 
 ```powershell
 git pull
-.\install.ps1   # idempotent, safe to re-run
+.\install.ps1   # idempotentní, bezpečné opakovaně spustit
 # restart Claude Code
 ```
 
-## Docs
+## Dokumentace
 
-- `docs/design.md` — full architecture, design decisions, Windows gotchas
-- `docs/runbook.md` — operator runbook, acceptance test procedure, troubleshooting
+- `docs/design.md` — plná architektura, designová rozhodnutí, Windows nástrahy
+- `docs/runbook.md` — provozní příručka, procedura akceptačního testu, troubleshooting
 
-## License
+## Licence
 
 MIT
