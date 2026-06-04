@@ -1,0 +1,23 @@
+{
+  "name": "codex-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Deterministic stdio MCP bridge exposing a single codex_turn tool that makes OpenAI Codex CLI an addressable, session-coherent team member for Claude Code.",
+  "type": "commonjs",
+  "main": "index.js",
+  "bin": {
+    "codex-bridge": "index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test test/bridge.test.js test/codex-backend.test.js test/mcp-server.test.js",
+    "smoke": "node --test test/live-smoke.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  }
+}
