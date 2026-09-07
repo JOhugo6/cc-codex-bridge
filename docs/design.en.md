@@ -77,11 +77,11 @@ Each completed response also has `<identityKey>.replies/<sha256(operation_id)>.u
 
 - `sha256` hashes the exact UTF-8 `conversation_id` without case conversion. The original ID is checked in state; old files require explicit migration according to the [runbook](runbook.en.md#identity-storage-and-upgrading-the-legacy-layout).
 - Keyed by `conversation_id` (= peer + run/conversation), so threads **do not bleed** across projects/teams.
-- Transcript = visibility + crash recovery + audit (catches a relay that silently edited) + re-seed on thread loss.
+- The transcript records backend requests/replies for audit. Compare them with separately captured Claude output to detect relay edits. Recovery uses the operation journal; a lost thread is never automatically replaced.
 
 ### 4.3 Membership — thin shell
 
-`~/.claude/agents/codex-peer.md` — the thinnest possible agent. Its only job: take the incoming message, call `codex_turn({envelope: completeIncomingMessage})`, return `reply` **verbatim**. No own reasoning. `conversation_id`, optional `working_dir` and optional `request_id` are parsed from the first line by bridge code, never by the relay. `thread_id` is **held by the bridge on disk**, not by the agent in its memory.
+`~/.claude/agents/codex-peer.md` instructs Claude to call `codex_turn({envelope: completeIncomingMessage})` once and copy `reply` without additions. LLM copying remains best effort; use the immutable MCP reply resource for exact bytes. `conversation_id`, optional `working_dir` and optional `request_id` are parsed from the first line by bridge code, never by the relay. `thread_id` is **held by the bridge on disk**, not by the agent in its memory.
 
 > **Leaner variant (Tier A):** if you don't need a name addressable by other sub-agents, the orchestrator calls `codex_turn` directly as a tool — without a relay agent. That's hub-and-spoke (only the orchestrator reaches Codex), not a full member. Good as a first prototype.
 
@@ -124,17 +124,14 @@ Each completed response also has `<identityKey>.replies/<sha256(operation_id)>.u
 
 - Windows uses native codex.exe (including the npm platform package) and the checked-in Windows PowerShell 5.1 Job Object supervisor. Both MCP registration and agent inline configuration launch native node.exe with separate arguments, without cmd /c; JSON/YAML escaping preserves paths containing spaces.
 - In user-scope config use **absolute paths**; `~`/`$HOME`/POSIX paths are not expanded.
-- In YAML frontmatter (`mcpServers.args`) use **forward slashes** (`C:/Users/...`), not backslashes — backslashes in YAML cause silent parse failures and the bridge will not start.
+- The installer serializes native paths as JSON-quoted YAML scalars, preserving backslashes and spaces. Do not hand-build unescaped YAML.
 - stdio = newline-delimited JSON → enforce **UTF-8 without BOM and LF**; all CLI chatter on **stderr** (stdout carries only the MCP protocol — anything else breaks the stream, including banners/`Write-Host`).
-- Globally registered bridge = **persistent ACE daemon across all projects** → per-thread sandbox + working-dir allow-list; "conveniently everywhere" ≠ "`danger-full-access` everywhere".
+- User-scope registration makes the command available across projects; Claude starts a stdio bridge for the session. Each conversation pins its working directory; the backend remains read-only.
 - Pass prompts via UTF-8 (avoids quoting/encoding hell), not as command-line arguments.
 
-## 7. Critical acceptance test
+## 7. Acceptance evidence
 
-**The test that validates OR kills the whole design:**
-> `thread_id` continuity across **3+ separate `SendMessage` rounds with forced compaction between them**. Codex must remember round-1 context even after compaction of the relay agent.
-
-If it passes → architecture holds. See runbook §4 for the detailed procedure.
+The [relay evaluator](relay-eval.en.md) separates deterministic bridge contracts from actual Claude behavior and real Codex continuity. A new Claude process receives only the next envelope while the bridge retains the thread on disk. Check actual arguments, thread ID, turn count, output bytes and resource integrity together; successful token recall is useful evidence, not a universal model guarantee. Interactive SendMessage routing needs its own framework checks in runbook §4.
 
 ## 8. Open questions
 

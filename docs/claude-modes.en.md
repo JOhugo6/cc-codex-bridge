@@ -141,6 +141,7 @@ script compatibility, isolated installation and repeat registration, actual MCP
 handshake/tool discovery, generated YAML and deterministic failure/timeout tests.
 The separate backend smoke was verified with Codex 0.153.4. Interactive in-process
 and split-pane teams were not executed for this change. Do not describe them as
-end-to-end tested. The diagnostics do not establish exact LLM relay copying:
+end-to-end tested. See the separate [opt-in relay eval and results](relay-eval.en.md).
+The diagnostics do not establish exact LLM relay copying:
 retain the underlying MCP result and retrieve `reply_artifact.uri` directly with
 `resources/read` for authoritative bytes; see the [artifact contract](runbook.en.md#exact-reply-bytes-and-mcp-resources).

@@ -77,11 +77,11 @@ Každá dokončená odpověď má také `<identityKey>.replies/<sha256(operation
 
 - `sha256` je hash přesného UTF-8 `conversation_id` bez změny velikosti písmen. Původní ID se kontroluje ve stavu; staré soubory vyžadují explicitní migraci podle [provozní příručky](runbook.md#uložení-identity-a-přechod-ze-starého-formátu).
 - Klíčováno `conversation_id` (= `peer` + běh/konverzace), aby se vlákna **neprolnula** mezi projekty/týmy.
-- Transcript = viditelnost + crash recovery + audit (chytíš relay, který tiše editoval) + re-seed při ztrátě vlákna.
+- Transcript ukládá požadavky a odpovědi backendu pro audit. Pro kontrolu změn provedených relay je porovnej s odděleně zachyceným výstupem Claude. Obnova pracuje s operation journalem; ztracené vlákno se automaticky nenahrazuje.
 
 ### 4.3 Membership — tenká slupka
 
-`~/.claude/agents/codex-peer.md` — nejtenčí možný agent. Jeho jediná práce: vzít příchozí zprávu, zavolat `codex_turn({envelope: completeIncomingMessage})`, vrátit `reply` **doslova**. Žádný vlastní reasoning. `conversation_id`, volitelný `working_dir` a volitelný `request_id` parsuje z prvního řádku kód bridge, nikdy relay. `thread_id` **drží most na disku**, ne agent ve své paměti.
+`~/.claude/agents/codex-peer.md` ukládá Claude jednou zavolat `codex_turn({envelope: completeIncomingMessage})` a zkopírovat `reply` bez dodatků. Kopírování LLM zůstává best effort; pro přesné bajty použij neměnný MCP resource odpovědi. `conversation_id`, volitelný `working_dir` a volitelný `request_id` parsuje z prvního řádku kód bridge, nikdy relay. `thread_id` **drží most na disku**, ne agent ve své paměti.
 
 > **Leanější varianta (Tier A):** pokud nepotřebuješ jméno adresovatelné *ostatními* sub-agenty, orchestrátor volá `codex_turn` přímo jako nástroj — bez relay agenta. Je to hub-and-spoke (Codex dosáhne jen orchestrátor), ne plnohodnotný člen. Fajn jako úplně první prototyp.
 
@@ -123,17 +123,14 @@ Každá dokončená odpověď má také `<identityKey>.replies/<sha256(operation
 
 - Windows používá nativní codex.exe (i z npm platform package) a verzovaný Windows PowerShell 5.1 Job Object supervisor. MCP registrace i inline definice agenta spouštějí nativní node.exe se samostatnými argumenty bez cmd /c; JSON/YAML escapování zachovává cesty s mezerami.
 - V user-scope configu **absolutní cesty**; `~`/`$HOME`/POSIX cesty se neexpandují.
-- V YAML frontmatteru (`mcpServers.args`) používej **forward slashes** (`C:/Users/...`), ne backslashes — backslashes v YAML způsobují tiché selhání parsování a bridge se nespustí.
+- Instalátor serializuje nativní cesty jako JSON řetězce platné v YAML, včetně zpětných lomítek a mezer. Neskládej ručně neescapované YAML.
 - stdio = newline-delimited JSON → vynuť **UTF-8 bez BOM a LF**; veškerý chatter CLI na **stderr** (na stdout jen MCP protokol, jinak rozbiješ stream — pozor i na bannery/`Write-Host`).
-- Globálně registrovaný most = **stálý ACE daemon ve všech projektech** → per-thread sandbox + allow-list working-dirů; „pohodlně všude" ≠ „`danger-full-access` všude".
+- User-scope registrace zpřístupní příkaz napříč projekty; Claude spouští stdio bridge pro session. Každá konverzace má připnutý pracovní adresář; backend zůstává read-only.
 - Prompty předávej přes UTF-8 (vyhneš se quoting/encoding peklu), ne přes argumenty příkazové řádky.
 
-## 7. Kritický akceptační test
+## 7. Akceptační důkazy
 
-**Test, který validuje NEBO zabije celý design:**
-> `thread_id` continuity přes **3+ samostatná `SendMessage` kola s vynucenou compaction mezi nimi**. Codex si musí pamatovat kontext z 1. kola i po compaction relay agenta.
-
-Když projde → architektura sedí. Viz runbook §4 pro detailní proceduru.
+[Relay eval](relay-eval.md) odděluje deterministické kontrakty bridge od skutečného chování Claude a kontinuity skutečného Codexu. Nový proces Claude dostane pouze další obálku, zatímco bridge drží vlákno na disku. Kontroluj skutečné argumenty, thread ID, číslo tahu, bajty výstupu a integritu resources společně; vybavení tokenu je užitečný důkaz, nikoli univerzální záruka chování modelu. Interaktivní SendMessage směrování vyžaduje vlastní framework kontroly v runbooku §4.
 
 ## 8. Otevřené otázky
 

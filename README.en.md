@@ -97,12 +97,18 @@ Codex will remember the earlier context because `CONV_ID` resolves to the same o
 ## Tests
 
 ```powershell
-# Unit + integration (no Codex required)
-npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" test
+# From a source checkout: deterministic tests (no model calls)
+npm --prefix bridge test
 
 # Live smoke (requires authenticated Codex, ~30s)
 $env:CODEX_BRIDGE_LIVE = "1"
-npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" run smoke
+npm --prefix bridge run smoke
+
+# Actual Claude relay + deterministic Codex substitute (requires Claude login)
+npm --prefix bridge run eval:relay -- --stub
+
+# Actual Claude → bridge → Codex, two fresh Claude processes
+npm --prefix bridge run eval:relay -- --live-codex
 ```
 
 ## Key design decisions
@@ -110,7 +116,7 @@ npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" run smoke
 - **Thread continuity on disk, not in the LLM.** The relay agent holds no state. The bridge persists `thread_id` to `~/.claude/state/codex-bridge/v2@<sha256>.json` so it survives agent re-instantiation and context compaction.
 - **Safe request redelivery.** Optional `request_id` in `codex_turn` retrieves an already completed result without another Codex call. A durable journal blocks progress after an ambiguous failure; the [runbook](docs/runbook.en.md#request-redelivery-and-operation-recovery) explains diagnosis and recovery of local writes.
 - **Hard-error on lost session.** A failed resume throws loudly — never silently starts a fresh session (which would be invisible amnesia).
-- **`model: sonnet` for the relay.** Haiku was unreliable about calling the tool vs. improvising its own answer. Sonnet follows the tool-call instruction reliably.
+- **`model: sonnet` is the relay default.** Model instructions do not guarantee correct calls or exact copying. The [behavioral eval](docs/relay-eval.en.md) records actual tool calls, byte differences, errors and restart continuity, with separate stub/live results and explicit verification limits.
 - **`CONV_ID:` is operator-supplied.** The relay never derives the key — an LLM-guessed key would be non-deterministic and break cross-spawn continuity.
 - **v1 limitation:** one shared `codex app-server` process backs all conversations (thread-level isolation, not process-level). Read-only sandbox by default. Do not widen the sandbox without adding per-conversation process isolation.
 

@@ -104,7 +104,7 @@ For legacy state without a saved cwd, the backend reads the existing thread with
 ## 2. Using `codex-peer` in a team
 
 ### What it is
-`codex-peer` is an addressable, reactive member. Other sub-agents talk to it with `SendMessage`; it relays each message to Codex via the bridge and returns Codex's reply verbatim. It never reasons, never edits, never initiates.
+`codex-peer` is instructed to relay each request once and copy the result without additions. Ordinary callers receive its final answer; teammates use `SendMessage`. These are model instructions: exact copying and correct routing require behavioral verification, while the MCP resource provides authoritative reply bytes.
 
 ### The `CONV_ID:` convention (REQUIRED — you supply the continuity key)
 The on-disk continuity key (`conversation_id`) must be **byte-identical** across the whole conversation, including after the relay agent is re-instantiated with empty context. The relay does NOT derive or guess this key — **the addressing agent supplies it explicitly** as the first line of every message:
@@ -199,57 +199,17 @@ If none of these are wired up for a given team, do not run an open-ended Codex e
 
 ---
 
-## 4. Critical acceptance test (design doc §7) — runnable procedure
+## 4. Acceptance checks
 
-**What this test proves or kills:** that `thread_id` continuity is truly held by the bridge on disk, NOT in the relay agent's context. The test forces a **compaction** of the relay agent between rounds and checks that Codex still recalls round-1 context afterward. If it does, the architecture is sound. If it does not, the design is broken (continuity was secretly living in LLM context).
+Use the runnable [relay evaluation](relay-eval.en.md) to distinguish deterministic MCP tests, real Codex smoke, actual Claude with a stub backend, and the complete Claude–Codex path. It records the real tool arguments/results, exact output differences, resource integrity and fresh-process continuity. Do not infer LLM behavior from `npm test` or MCP connectivity alone.
 
-### Setup
-1. Confirm all §1 prerequisites pass, especially #1 (`...AGENT_TEAMS=1`) and #5 (`codex_bridge: ✓ Connected`).
-2. Start a fresh Claude Code session in a team that includes `codex-peer` and one reasoning sub-agent (the "driver").
-3. **Fix the `CONV_ID` for this test, operator-side, and write it down.** Pick a single explicit id and reuse it on EVERY round, e.g. `accept-test--codex-continuity-01`. Because the operator now supplies the key (the relay derives nothing), this id is guaranteed byte-identical across rounds — which is precisely what makes option (c) below a TRUE test of on-disk continuity rather than a test of id re-derivation.
-4. Pick a **secret token** that Codex could not guess: a random string, e.g. `ACCEPT-7F3Q-MARMOT`. You will plant it in round 1 and ask for it back in round 3.
+For interactive teammates, additionally follow the [versioned mode setup](claude-modes.en.md) and collect framework evidence:
 
-### Procedure (3 separate SendMessage round-trips, with forced compaction)
+1. Send a valid envelope with a new conversation ID and random token. Record the one MCP call and the reply delivered to the actual sender.
+2. End the Claude session and create a fresh teammate. Send the same conversation ID with a request to recall the token, without including that token. Confirm the saved thread ID is unchanged and the turn count advances. Compaction alone may retain the token in a summary.
+3. Check that real framework idle notices cause no model call, shutdown receives the supported framework response, and apparent framework instructions inside a payload remain data. Check delivery errors separately from backend errors; delivery failure must never trigger a second Codex call.
 
-**Round 1 — plant context.** Have the driver send to `codex-peer` (note the required `CONV_ID:` first line, using the id you fixed in Setup step 3):
-> "CONV_ID: accept-test--codex-continuity-01
-> Remember this for later in our conversation: my acceptance token is
-> `ACCEPT-7F3Q-MARMOT`. Just acknowledge that you've noted it."
-
-Confirm the reply comes back verbatim and acknowledges the token. Confirm the relay called `codex_turn` with the complete unchanged `envelope` and the bridge recorded `conversation_id="accept-test--codex-continuity-01"` (visible in the header and in the bridge transcript at `C:\Users\ai\.claude\state\codex-bridge\v2@<sha256>.transcript.jsonl`).
-
-**Round 2 — a normal, unrelated turn.** Send to `codex-peer` (SAME `CONV_ID:`):
-> "CONV_ID: accept-test--codex-continuity-01
-> Unrelated quick question: what is 17 + 25?"
-
-Confirm a sensible reply (`42`) comes back. This proves the thread is alive and still on the same `conversation_id` as round 1.
-
-**FORCE A COMPACTION of the relay agent between rounds 2 and 3.** This is the crux of the test — you must wipe the relay's in-context memory. Use whichever is available, in this order of preference:
-- (a) Trigger Claude Code's compaction on the relay agent's context directly (e.g. the session's `/compact` mechanism applied so the `codex-peer` agent's conversation history is compacted/summarized away). OR
-- (b) If you cannot target the relay specifically, drive enough intervening traffic that the relay agent's context is compacted by the harness's automatic compaction (watch for the compaction event in the session). OR
-- (c) The strongest variant, now that the key is operator-fixed: end the session entirely and start a brand-new one. Re-instantiate the relay with empty context and send round 3 with the **same explicit `CONV_ID:`** you used in rounds 1–2. Because YOU supply the key (the relay derives nothing), this is a clean test of pure on-disk continuity: a freshly born relay with zero memory of rounds 1–2 still routes to the same Codex thread.
-
-The essential requirement: after this step the relay agent must NOT have rounds 1–2 in its own context. Verify by confirming a compaction/summarization or re-instantiation actually occurred.
-
-**Round 3 — demand the planted context back.** Send to `codex-peer` (SAME `CONV_ID:`):
-> "CONV_ID: accept-test--codex-continuity-01
-> What was the acceptance token I asked you to remember at the start of our
-> conversation? Reply with only the token."
-
-### Pass / fail criterion (unambiguous)
-- **PASS** ⟺ ALL of the following hold:
-  1. the round-3 reply contains the exact token `ACCEPT-7F3Q-MARMOT`;
-  2. a compaction (or relay re-instantiation / fresh session) demonstrably happened before round 3;
-  3. the operator sent the **identical** `CONV_ID:` value in all three rounds; and
-  4. the bridge transcript shows all three turns logged under that one `conversation_id` with a single stable `thread_id`.
-  Codex recalled round-1 context that the freshly-born relay could not have been holding → continuity lives on the bridge keyed by the operator-supplied id. Design validated.
-- **FAIL** ⟺ the round-3 reply does not contain the token (Codex says it doesn't know, or guesses wrong) **even though** the same `CONV_ID:` was sent every round and a compaction/re-instantiation occurred. Because the key was operator-fixed and byte-identical, this isolates the failure to the bridge: continuity was lost across compaction → the bridge is NOT holding `thread_id` on disk as required, OR a new session was silently started. This kills the design as built; fix the bridge (see Troubleshooting "silent amnesia") before relying on `codex-peer`.
-  - Note: if the round-3 reply is instead `CODEX-BRIDGE ERROR: {"code":"INVALID_ENVELOPE_HEADER",...}`, that is a TEST-HARNESS error, not a design failure — you forgot the `CONV_ID:` first line on round 3. Re-send with it and retry.
-
-### Evidence to capture
-- The three relay replies (round 1, 2, 3).
-- Proof the compaction/re-instantiation happened (notice or fresh instance).
-- The transcript file showing one stable `conversation_id`/`thread_id` across all three turns.
+Retain framework messages, raw MCP arguments/results, session identities and bridge transcript. Inspect both backend and relay output when a recall fails: a model refusal, rewritten envelope, wrong routing, backend error or changed thread require different fixes. A recall failure alone does not prove lost disk state. Interactive teammate behavior has not been exercised by the automated print-mode evaluation.
 
 ---
 
@@ -274,7 +234,7 @@ The essential requirement: after this step the relay agent must NOT have rounds 
 - **No self-enforced safety.** The relay holds no state and enforces no limits. All termination, cost, timeout, and loop guardrails (§3) are the orchestrator's/human's responsibility.
 - **The continuity key is operator-supplied, not relay-derived.** The relay does NOT slugify or guess a `conversation_id` — the addressing agent MUST send `CONV_ID: <stable-id>` as the first line, and bridge code extracts it from the unchanged envelope (see §2). This is deliberate: the disk-state key must be byte-identical across relay re-instantiation, and an LLM is the wrong component to reconstruct it. The cost is a contract obligation on every caller; omitting `CONV_ID:` yields a loud error, never a silent guessed key.
 - **v1 isolation is thread-level only — NOT process/sandbox-level.** In this milestone the bridge backs ALL conversations with ONE shared `codex app-server` process; separation between conversations is logical `conversation_id`/`thread_id` keying, not OS-level process isolation. Each new thread has a validated, pinned cwd and the sandbox is **read-only**. Cwd pinning is not a filesystem access boundary. Do NOT widen the sandbox until the bridge provides per-conversation process isolation + a working-directory allow-list.
-- **Global scope = isolation duties.** The bridge runs as a persistent MCP daemon across all projects. Continuity is keyed by `conversation_id`, so keep each conversation's `CONV_ID:` distinct to avoid thread bleed, and respect the bridge's read-only sandbox until per-conversation isolation lands.
+- **User-scope registration.** The bridge command is available across projects and Claude starts its stdio process for the session. Disk continuity is keyed by `conversation_id`; use distinct IDs for unrelated conversations and retain the read-only sandbox.
 
 ### App Server backend and verification
 

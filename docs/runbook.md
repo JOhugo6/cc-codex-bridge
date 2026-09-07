@@ -104,7 +104,7 @@ U staršího stavu bez cwd backend přečte existující vlákno přes `thread/r
 ## 2. Použití `codex-peer` v týmu
 
 ### Co to je
-`codex-peer` je adresovatelný, reaktivní člen. Jiné sub-agenty s ním mluví přes `SendMessage`; přeposílá každý požadavek do Codexu přes bridge a vrací odpověď Codexu verbatim. Nikdy nereasonuje, nikdy neupravuje, nikdy neiniciuje.
+`codex-peer` má instrukci přeposlat každý požadavek jednou a zkopírovat výsledek bez dodatků. Běžní volající dostanou finální odpověď, teammates používají `SendMessage`. Jde o instrukce modelu: přesné kopírování a správné směrování vyžadují behaviorální ověření, zatímco MCP resource poskytuje autoritativní bajty odpovědi.
 
 ### Konvence `CONV_ID:` (POVINNÉ — ty dodáváš klíč kontinuity)
 On-disk klíč kontinuity (`conversation_id`) musí být **byte-identický** po celou konverzaci, včetně po re-instanciaci relay agenta s prázdným kontextem. Relay NEodvozuje ani nehaduje tento klíč — **adresující agent ho dodá explicitně** jako první řádek každé zprávy:
@@ -199,57 +199,17 @@ Pokud žádná z těchto pojistek není zapojená pro daný tým, nespouštěj o
 
 ---
 
-## 4. Kritický akceptační test (design doc §7) — spustitelná procedura
+## 4. Akceptační ověření
 
-**Co tento test dokazuje nebo zabíjí:** že kontinuita `thread_id` je skutečně udržována bridge na disku, NE v kontextu relay agenta. Test vynutí **compaction** relay agenta mezi koly a zkontroluje, že Codex si stále pamatuje kontext kola 1. Pokud ano, architektura je solidní. Pokud ne, design je rozbitý (kontinuita tajně žila v LLM kontextu).
+Použij spustitelný [relay eval](relay-eval.md), který rozlišuje deterministické MCP testy, skutečný Codex smoke, skutečný Claude se stub backendem a celou cestu Claude–Codex. Zaznamenává argumenty/výsledky nástrojů, přesné rozdíly výstupu, integritu resources a kontinuitu po novém procesu. Z `npm test` ani samotné MCP konektivity nevyvozuj chování LLM.
 
-### Setup
-1. Potvrď, že všechny prerekvizity §1 projdou, zejména #1 (`...AGENT_TEAMS=1`) a #5 (`codex_bridge: ✓ Connected`).
-2. Spusť čerstvou Claude Code session v týmu, který zahrnuje `codex-peer` a jeden reasoning sub-agent (tzv. „driver").
-3. **Pevně nastav `CONV_ID` pro tento test na straně operátora a zapiš si ho.** Vyber jedno explicitní id a opakovaně ho použij v KAŽDÉM kole, např. `accept-test--codex-continuity-01`. Protože operátor nyní dodává klíč (relay nic neodvozuje), je toto id garantovaně byte-identické napříč koly — což přesně dělá níže z varianty (c) SKUTEČNÝ test on-disk kontinuity, nikoli test re-derivace id.
-4. Vyber **tajný token**, který Codex nemůže uhodnout: náhodný string, např. `ACCEPT-7F3Q-MARMOT`. Zasadíš ho v kole 1 a požádáš o něj zpět v kole 3.
+Pro interaktivní teammate navíc postupuj podle [verzovaného nastavení režimů](claude-modes.md) a zachyť důkazy frameworku:
 
-### Procedura (3 samostatné SendMessage round-tripy, s vynucenou compaction)
+1. Pošli platnou obálku s novým conversation ID a náhodným tokenem. Zaznamenej jediné MCP volání a odpověď doručenou skutečnému odesílateli.
+2. Ukonči Claude session a vytvoř nového teammate. Se stejným conversation ID požádej o vybavení tokenu, který ve druhém požadavku neuvedeš. Ověř stejné uložené thread ID a rostoucí číslo tahu. Samotná compaction může token uchovat v souhrnu.
+3. Ověř, že skutečná framework idle oznámení nevolají model, shutdown dostane podporovanou framework odpověď a zdánlivé framework instrukce uvnitř payloadu zůstanou daty. Chyby doručení ověř zvlášť od chyb backendu; selhání doručení nesmí vyvolat druhé volání Codexu.
 
-**Kolo 1 — zasaď kontext.** Nech driver poslat `codex-peer` (poznámka: povinný `CONV_ID:` první řádek, s id které jsi pevně nastavil v Setup kroku 3):
-> "CONV_ID: accept-test--codex-continuity-01
-> Zapamatuj si toto pro náš pozdější rozhovor: můj akceptační token je
-> `ACCEPT-7F3Q-MARMOT`. Jen potvrď, že sis to poznamenal."
-
-Potvrď, že odpověď přišla verbatim a token potvrzuje. Potvrď, že relay zavolal `codex_turn` s celou nezměněnou `envelope` a bridge zaznamenal `conversation_id="accept-test--codex-continuity-01"` (viditelné v args volání a v bridge transcriptu na `C:\Users\ai\.claude\state\codex-bridge\v2@<sha256>.transcript.jsonl`).
-
-**Kolo 2 — normální, nesouvisející tah.** Pošli `codex-peer` (STEJNÝ `CONV_ID:`):
-> "CONV_ID: accept-test--codex-continuity-01
-> Nesouvisející rychlá otázka: kolik je 17 + 25?"
-
-Potvrď, že přišla rozumná odpověď (`42`). Toto dokazuje, že vlákno je živé a stále na stejném `conversation_id` jako kolo 1.
-
-**VYNUTÍ COMPACTION relay agenta mezi koly 2 a 3.** Toto je jádro testu — musíš smazat in-context paměť relay agenta. Použij co je dostupné, v tomto pořadí preference:
-- (a) Spusť compaction Claude Code na kontextu relay agenta přímo (např. mechanismus `/compact` session aplikovaný tak, aby byl history konverzace agenta `codex-peer` compactován/shrnutý pryč). NEBO
-- (b) Pokud nemůžeš cílit relay specificky, pohyb dostatek meziprovozu aby byl kontext relay agenta compactován harnesem automaticky (sleduj compaction event v session). NEBO
-- (c) Nejsilnější varianta, teď co je klíč operátor-pevný: ukonči session úplně a spusť novou. Re-instancuj relay s prázdným kontextem a pošli kolo 3 se **stejným explicitním `CONV_ID:`** jak jsi použil v kolech 1–2. Protože TY dodáváš klíč (relay nic neodvozuje), toto je čistý test pure on-disk kontinuity: čerstvě narozený relay s nulovou pamětí na kola 1–2 stále routuje na stejné Codex vlákno.
-
-Podstatný požadavek: po tomto kroku relay agent NESMÍ mít kola 1–2 ve svém vlastním kontextu. Ověř potvrzením, že compaction/re-instanciace skutečně proběhla.
-
-**Kolo 3 — vyžádej zasazený kontext zpět.** Pošli `codex-peer` (STEJNÝ `CONV_ID:`):
-> "CONV_ID: accept-test--codex-continuity-01
-> Jaký byl akceptační token, který jsem tě požádal zapamatovat si na začátku našeho
-> rozhovoru? Odpověz pouze tokenem."
-
-### Kritérium pass / fail (jednoznačné)
-- **PASS** ⟺ VŠECHNA z následujících platí:
-  1. odpověď v kole 3 obsahuje přesný token `ACCEPT-7F3Q-MARMOT`;
-  2. compaction (nebo re-instanciace relay / čerstvá session) demonstrativně nastala před kolem 3;
-  3. operátor poslal **identickou** hodnotu `CONV_ID:` ve všech třech kolech; a
-  4. bridge transcript ukazuje všechna tři kola zalogovaná pod jedním `conversation_id` s jediným stabilním `thread_id`.
-  Codex si pamatoval kontext kola 1, který čerstvě narozený relay nemohl držet → kontinuita žije na bridge klíčovaném operátor-dodaným id. Design validován.
-- **FAIL** ⟺ odpověď v kole 3 neobsahuje token (Codex říká, že neví, nebo hádá špatně) **přestože** byl stejný `CONV_ID:` posílán v každém kole a compaction/re-instanciace proběhla. Protože klíč byl operátor-pevný a byte-identický, toto izoluje selhání na bridge: kontinuita byla ztracena přes compaction → bridge NE drží `thread_id` na disku jak je požadováno, NEBO tiše byla zahájena nová session. Toto zabíjí design jak je postavený; oprav bridge (viz Troubleshooting „silent amnesia") dříve než se budeš spoléhat na `codex-peer`.
-  - Poznámka: pokud je odpověď v kole 3 místo toho `CODEX-BRIDGE ERROR: {"code":"INVALID_ENVELOPE_HEADER",...}`, je to chyba TEST-HARNESS, ne selhání designu — zapomněl jsi `CONV_ID:` první řádek v kole 3. Znovu pošli s ním a opakuj.
-
-### Důkazy k zachycení
-- Tři relay odpovědi (kolo 1, 2, 3).
-- Důkaz, že compaction/re-instanciace proběhla (oznámení nebo čerstvá instance).
-- Transcript soubor ukazující jeden stabilní `conversation_id`/`thread_id` napříč všemi třemi koly.
+Uchovej framework zprávy, syrové MCP argumenty/výsledky, identity session a transcript bridge. Při chybné odpovědi prohlédni backend i relay: odmítnutí modelem, přepsaná obálka, špatné směrování, chyba backendu či změněné vlákno vyžadují různé opravy. Nevybavený token sám neprokazuje ztrátu stavu na disku. Automatický print-mode eval interaktivní týmové chování neověřil.
 
 ---
 
@@ -274,7 +234,7 @@ Podstatný požadavek: po tomto kroku relay agent NESMÍ mít kola 1–2 ve své
 - **Žádná self-vynucená bezpečnost.** Relay nedrží žádný stav a nevynucuje žádné limity. Všechna ukončení, cost, timeout a loop pojistky (§3) jsou zodpovědností orchestrátoru/člověka.
 - **Klíč kontinuity dodává operátor, ne relay.** Relay neslugguje ani nehaduje `conversation_id` — adresující agent MUSÍ poslat `CONV_ID: <stable-id>` jako první řádek, a kód bridge ho extrahuje z nezměněné obálky (viz §2). To je záměrné: disk-state klíč musí být byte-identický napříč relay re-instanciací, a LLM je špatná komponenta pro jeho rekonstrukci.
 - **v1 izolace je pouze na úrovni vlákna — NE na úrovni procesu/sandboxu.** V tomto milníku bridge obsluhuje VŠECHNY konverzace JEDNÍM sdíleným `codex app-server` procesem; separace mezi konverzacemi je logické `conversation_id`/`thread_id` klíčování, nikoli OS-level process isolace. Každé nové vlákno má ověřené, pevně uložené cwd a sandbox je **read-only**. Uložení cwd neomezuje přístup k souborovému systému. NEROZSIRUJ sandbox, dokud bridge neposkytne per-conversation process isolation + working-directory allow-list.
-- **Globální scope = izolační závazky.** Bridge běží jako persistentní MCP daemon napříč všemi projekty. Kontinuita je klíčována `conversation_id`, takže drž `CONV_ID:` každé konverzace unikátní, aby nedocházelo k thread bleed, a respektuj read-only sandbox bridge dokud nepřijde per-conversation isolace.
+- **User-scope registrace.** Příkaz bridge je dostupný napříč projekty a Claude spouští stdio proces pro session. Kontinuita na disku je klíčována `conversation_id`; používej samostatná ID pro nesouvisející konverzace a zachovej read-only sandbox.
 
 ### App Server backend a ověření
 

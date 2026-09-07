@@ -97,12 +97,18 @@ Codex si pamatuje dřívější kontext, protože `CONV_ID` odkazuje na stejné 
 ## Testy
 
 ```powershell
-# Unit + integration (nevyžaduje Codex)
-npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" test
+# Z klonu repozitáře: deterministické testy (bez modelových volání)
+npm --prefix bridge test
 
 # Live smoke (vyžaduje autentizovaný Codex, ~30s)
 $env:CODEX_BRIDGE_LIVE = "1"
-npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" run smoke
+npm --prefix bridge run smoke
+
+# Skutečný Claude relay + deterministická náhrada Codexu (vyžaduje Claude login)
+npm --prefix bridge run eval:relay -- --stub
+
+# Skutečný Claude → bridge → Codex, dva nové procesy Claude
+npm --prefix bridge run eval:relay -- --live-codex
 ```
 
 ## Klíčová designová rozhodnutí
@@ -110,7 +116,7 @@ npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" run smoke
 - **Kontinuita vlákna na disku, ne v LLM.** Relay agent nedrží žádný stav. Bridge persistuje `thread_id` do `~/.claude/state/codex-bridge/v2@<sha256>.json`, takže přežije re-instanciaci agenta a context compaction.
 - **Bezpečné opakování požadavku.** Volitelné `request_id` v `codex_turn` vrátí již dokončený výsledek bez nového volání Codexu. Trvalý journal blokuje pokračování po nejasném selhání; [runbook](docs/runbook.md#opakované-doručení-a-obnova-operace) popisuje diagnostiku a obnovu lokálních zápisů.
 - **Hard-error při ztrátě session.** Selhání obnovy vlákna vyhodí hlasitou chybu — nikdy tiše nezahájí novou session (to by byla neviditelná amnézie).
-- **`model: sonnet` pro relay.** Haiku byl nespolehlivý ohledně volání nástroje vs. improvizace vlastní odpovědi. Sonnet spolehlivě následuje instrukce pro tool call.
+- **`model: sonnet` je výchozí volba relay.** Instrukce modelu nezaručují správná volání ani přesné kopírování. [Behaviorální eval](docs/relay-eval.md) zaznamenává skutečná volání, rozdíly bajtů, chyby a kontinuitu po restartu; odděluje stub/živé výsledky a uvádí omezení ověření.
 - **`CONV_ID:` dodává operátor.** Relay klíč nikdy neodvozuje — LLM-hádaný klíč by byl nedeterministický a zlomil by cross-spawn kontinuitu.
 - **v1 limitace:** jeden sdílený `codex app-server` proces obsluhuje všechny konverzace (izolace na úrovni vlákna, ne procesu). Sandbox je read-only. Nerozsiruj sandbox bez přidání per-conversation process isolation.
 

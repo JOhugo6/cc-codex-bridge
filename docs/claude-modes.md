@@ -137,6 +137,7 @@ skriptů PowerShell 5.1/7, izolovaná instalace a opakovaná registrace, skuteč
 MCP handshake/tools, generované YAML a deterministické chyby/timeouty.
 Samostatný backend smoke byl ověřen s Codex 0.153.4. Interaktivní in-process
 ani split-pane týmy se v této změně nespouštěly; nelze je označit za end-to-end
-otestované. Diagnostika nezaručuje přesnost kopírování LLM: uchovej skutečný
+otestované. Skutečný relay má samostatný [opt-in eval a výsledky](relay-eval.md).
+Diagnostika nezaručuje přesnost kopírování LLM: uchovej skutečný
 MCP výsledek a pro autoritativní bajty čti `reply_artifact.uri` přes
 `resources/read`, viz [kontrakt artefaktů](runbook.md#přesné-bajty-odpovědi-a-mcp-resources).
