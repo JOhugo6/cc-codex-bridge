@@ -8,12 +8,14 @@
 
 const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
-const { ListToolsRequestSchema, CallToolRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
+const { ListToolsRequestSchema, CallToolRequestSchema, ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema, ReadResourceRequestSchema, McpError, ErrorCode } = require('@modelcontextprotocol/sdk/types.js');
 const { z } = require('zod');
 
 const { CodexBridge } = require('./lib/bridge');
 const { CodexBackend } = require('./lib/codex-backend');
 const { parseToolInput, inputJsonSchema, errorResult } = require('./lib/turn-input');
+const replyArtifacts = require('./lib/reply-artifacts');
 
 function elog(...args) {
   process.stderr.write('[codex-bridge] ' + args.map(String).join(' ') + '\n');
@@ -67,12 +69,14 @@ async function main() {
   const server = new Server(
     { name: 'codex-bridge', version: '1.0.0' },
     {
-      capabilities: { tools: {} },
+      capabilities: { tools: {}, resources: {} },
       instructions:
         'Deterministic bridge to OpenAI Codex CLI. Relays call codex_turn with only envelope: ' +
         'the complete incoming message unchanged. Direct callers may instead supply conversation_id, ' +
         'message and optional working_dir/request_id. Never mix these modes. The bridge owns ' +
-        'thread continuity on disk; return reply verbatim or the single-line tool error unchanged.',
+        'thread continuity on disk; return reply verbatim or the single-line tool error unchanged. ' +
+        'For exact output bytes, clients read reply_artifact.uri with resources/read and decode its base64 blob; ' +
+        'verify reply_artifact.sha256 and byte_length in code. LLM relay prose has no byte guarantee.',
     }
   );
 
@@ -80,6 +84,12 @@ async function main() {
     reply: z.string().describe('Codex reply text, verbatim.'),
     thread_id: z.string().describe('Persisted Codex thread id for this conversation.'),
     turn: z.number().int().describe('1-based turn number within this conversation.'),
+    reply_artifact: z.object({
+      uri: z.string(), mimeType: z.literal(replyArtifacts.MIME_TYPE),
+      sha256: z.string().regex(/^[a-f0-9]{64}$/), byte_length: z.number().int().nonnegative(),
+      conversation_id: z.string(), operation_id: z.string(), turn: z.number().int().positive(),
+      request_id: z.string().nullable(),
+    }).describe('Immutable UTF-8 reply resource with code-computed SHA-256, byte length and turn identity.'),
   });
   // The low-level SDK handlers let validation errors use the same single-line format as
   // backend errors, and advertise both strict input alternatives without SDK union coercion.
@@ -97,6 +107,20 @@ async function main() {
       outputSchema: z.toJSONSchema(outputSchema),
     }],
   }));
+  // Links in tool results and this template expose resources without enumerating history.
+  server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }));
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [{
+    uriTemplate: replyArtifacts.URI_TEMPLATE, name: 'Codex reply bytes', mimeType: replyArtifacts.MIME_TYPE,
+    description: 'Use the exact reply_artifact.uri returned by codex_turn. resources/read returns a base64 blob of the persisted UTF-8 reply.',
+  }] }));
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    try { return await replyArtifacts.readResource(request.params.uri); }
+    catch (err) {
+      const code = err.code === 'INVALID_RESOURCE_URI' ? ErrorCode.InvalidParams
+        : err.code === 'RESOURCE_NOT_FOUND' ? -32002 : ErrorCode.InternalError;
+      throw new McpError(code, `${err.code || 'RESOURCE_READ_FAILED'}: ${err.message}`);
+    }
+  });
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
         if (request.params.name !== 'codex_turn') {
@@ -109,10 +133,14 @@ async function main() {
         const out = await bridge.turn(conversation_id, message, { working_dir, request_id });
         outputSchema.parse(out);
         return {
-          // structuredContent is the fidelity-bearing channel (design §2: fidelity from tool
-          // result, not relay prose). Also mirror to a text block for clients that ignore it.
+          // Keep the compatible reply field/text block; expose immutable bytes directly to
+          // MCP clients. A relay's generated prose is not an integrity-bearing channel.
           structuredContent: out,
-          content: [{ type: 'text', text: out.reply }],
+          content: [{ type: 'text', text: out.reply }, {
+            type: 'resource_link', uri: out.reply_artifact.uri,
+            name: `Codex reply, turn ${out.turn}`, mimeType: out.reply_artifact.mimeType,
+            size: out.reply_artifact.byte_length,
+          }],
         };
       } catch (err) {
         elog('codex_turn FAILED:', (err && err.code) || '', (err && err.message) || err);

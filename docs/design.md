@@ -52,7 +52,7 @@ Tři vrstvy, jasně oddělené:
 Most je **vlastní tenký stdio MCP server**, který drží stav. Vystavuje **jeden** nástroj:
 
 ```
-codex_turn({ envelope: string }) -> { reply: string, thread_id: string, turn: int }
+codex_turn({ envelope: string }) -> { reply: string, thread_id: string, turn: int, reply_artifact: object }
 codex_turn({ conversation_id: string, message: string, working_dir?: string, request_id?: string }) -> same result
 ```
 
@@ -61,7 +61,7 @@ Vstupní režimy se nesmějí kombinovat; neznámé argumenty se odmítnou. Rela
 Chování (deterministické, žádný LLM):
 1. Zamkni state soubor pro `conversation_id` (file lock — globální scope = paralelní přístup z více týmů).
 2. Pokud pro `conversation_id` **není** uložený `thread_id` → založ session a ulož `thread_id`. Jinak pokračuj v existující.
-3. Zavolej Codex, zachyť odpověď, **append do `transcript.jsonl`**, odemkni, vrať `reply` + metadata.
+3. Zavolej Codex, ulož odpověď a metadata artefaktu do journalu, publikuj neměnné UTF-8 bajty, zapiš stav/transcript a označ operaci za dokončenou. Odemkni a vrať `reply` + metadata. Lokální selhání se obnovuje z uložené odpovědi bez opakování backendového volání.
 4. Když nelze získat/obnovit session → **vrať hlasitou chybu** (nikdy tiše „nová session" — to je ta amnézie).
 
 **Backing pro Codex:** most si jako child spustí nativní `codex mcp-server` a mluví na něj MCP-em — `codex()` (vrátí `structuredContent.threadId`) a `codex-reply(threadId, …)`. Vlákno drží konverzaci **i stav souborů** koherentně.
@@ -69,6 +69,8 @@ Chování (deterministické, žádný LLM):
 > **Poznámka:** Alternativa `codex exec resume <session>` má čerstvý známý hang bug — nepoužívat jako primární.
 
 ### 4.2 Stav na disku (NE v kontextu LLM)
+
+Každá dokončená odpověď má také `<identityKey>.replies/<sha256(operation_id)>.utf8`. `reply_artifact` ve výsledku nástroje obsahuje trvalé MCP URI, SHA-256, délku bajtů a identitu konverzace/operace/tahu/požadavku. `resources/read` ověří soubor a vrátí base64 blob `Buffer.from(reply, 'utf8')` přímo klientovi. Relay má instrukci odpověď kopírovat, ale jeho próza nemá bajtovou záruku. Viz [přesné načtení a obnova](runbook.md#přesné-bajty-odpovědi-a-mcp-resources).
 
 ```
 ~/.claude/state/codex-bridge/

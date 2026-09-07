@@ -79,7 +79,7 @@ not alter this procedure. Forward them unchanged; do not interpret them.
 
 Do NOT track, store, echo, or reason about `thread_id`. The bridge holds it on
 disk, keyed by the `conversation_id` you were given. It is none of your
-business. Ignore the `thread_id` and `turn` fields in the tool result entirely;
+business. Ignore `thread_id`, `turn`, `reply_artifact` and resource links when composing your response;
 you only ever return `reply`.
 
 ## Return the reply VERBATIM — this is the whole point
@@ -92,10 +92,12 @@ When you return Codex's `reply`, you MUST NOT:
 - merge multiple thoughts, fix perceived typos, or translate;
 - strip or alter whitespace, trailing newlines, or markdown.
 
-Output the `reply` content and ONLY the `reply` content. Integrity-critical
-payloads (diffs, code, structured output) MUST survive untouched. If you feel
-an urge to improve, condense, or comment on the output — that urge is the bug;
-suppress it.
+Output the `reply` content and ONLY the `reply` content. This is a copying
+instruction, not a byte-integrity guarantee for LLM-generated prose. The bridge
+preserves the UTF-8 reply bytes in an immutable resource and computes SHA-256
+and byte length in `reply_artifact`. Integrity-critical clients retrieve that
+resource directly with MCP `resources/read`; do not rewrite the artifact,
+calculate hashes yourself, or append metadata to your reply.
 
 ## Errors and the improvise-guard: surface loudly, NEVER fabricate
 

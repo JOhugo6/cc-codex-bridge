@@ -69,6 +69,8 @@ Relay předává celou zprávu jako `codex_turn({envelope: "CONV_ID: ...\n..."})
 
 ### V Claude Code týmu
 
+Pro přesné diffy/kód zachovej přímý MCP výsledek: `reply_artifact` nabízí neměnné UTF-8 resource URI, SHA-256, délku bajtů a identitu tahu. Načti jej přes `resources/read` a ověř dekódované bajty kódem; próza relaye je best effort. Viz [přesné načtení odpovědi](docs/runbook.md#přesné-bajty-odpovědi-a-mcp-resources).
+
 ```python
 # Příklad: orchestrátor posílá zprávu codex-peer
 SendMessage(to="codex-peer", message="""CONV_ID: sprint42--arch-review

@@ -1,5 +1,6 @@
 'use strict';
-// Durable write-ahead journal. All access requires the per-conversation lock. A backend
+// Durable write-ahead journal. Mutations/turn coordination require the conversation lock;
+// load alone also supports atomic read-only snapshots for immutable resources. A backend
 // error is ambiguous: the remote side may have executed before the response was lost.
 const fsp = require('node:fs/promises');
 const crypto = require('node:crypto');
@@ -7,6 +8,7 @@ const { isDeepStrictEqual } = require('node:util');
 const paths = require('./paths');
 const path = require('node:path');
 const store = require('./store');
+const replyArtifacts = require('./reply-artifacts');
 
 function failure(code, message) {
   return Object.assign(new Error(message), { code });
@@ -64,6 +66,7 @@ async function load(conversationId) {
             op.after.last_operation_id !== op.operation_id || op.after.journal_version !== 1 ||
             (op.input.working_dir_policy === 'pinned' && op.after.working_dir !== op.input.working_dir) ||
             typeof op.received_at !== 'string') throw new Error('invalid recorded result');
+        replyArtifacts.assertMetadata(conversationId, op);
       }
     }
     return journal;
@@ -89,14 +92,25 @@ function assertState(journal, state) {
   }
 }
 
-function findReplay(journal, requestId, input) {
+async function findReplay(journal, requestId, input) {
   if (!journal || requestId === undefined) return null;
   const op = journal.operations.find((item) => item.request_id === requestId);
   if (!op) return null;
   if (!isDeepStrictEqual(op.input, input)) {
     throw failure('REQUEST_ID_CONFLICT', `request_id '${requestId}' was already used with different input.`);
   }
-  return op.status === 'completed' ? structuredClone(op.result) : null;
+  return op.status === 'completed' ? ensureReply(journal.conversation_id, journal, op) : null;
+}
+
+async function ensureReply(conversationId, journal, op) {
+  const descriptor = await replyArtifacts.ensure(conversationId, op);
+  // Completed journals from older versions gain an artifact without a new backend turn,
+  // transcript entry or state rewind. Failed local upgrades are safe to repeat.
+  if (op.result.reply_artifact === undefined) {
+    op.result.reply_artifact = descriptor;
+    await save(conversationId, journal);
+  }
+  return structuredClone(op.result);
 }
 
 function assertComplete(journal, conversationId) {
@@ -135,6 +149,7 @@ async function receive(conversationId, journal, result) {
   op.status = 'received';
   op.received_at = ts;
   op.result = result;
+  op.result.reply_artifact = replyArtifacts.describe(conversationId, op);
   op.after = {
     ...(op.before?.legacy_migration ? { legacy_migration: op.before.legacy_migration } : {}),
     conversation_id: conversationId, thread_id: result.thread_id, turn: result.turn,
@@ -148,9 +163,10 @@ async function receive(conversationId, journal, result) {
 async function finish(conversationId, journal, state) {
   assertState(journal, state);
   const op = journal.operations.at(-1);
-  if (op.status === 'completed') return structuredClone(op.result);
+  if (op.status === 'completed') return ensureReply(conversationId, journal, op);
   if (op.status !== 'received') assertComplete(journal, conversationId);
   // Every step is repeatable after an I/O error or restart; the backend is never involved.
+  await ensureReply(conversationId, journal, op);
   await store.ensureTranscriptEntry(conversationId, transcriptEntry(op, 'in'));
   if (!isDeepStrictEqual(state, op.after)) await store.saveState(conversationId, op.after);
   await store.ensureTranscriptEntry(conversationId, transcriptEntry(op, 'out'));

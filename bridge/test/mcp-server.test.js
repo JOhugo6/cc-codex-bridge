@@ -10,6 +10,7 @@ const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
+const crypto = require('node:crypto');
 
 const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
 const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
@@ -89,6 +90,53 @@ test('raw MCP envelope preserves body, pins decoded cwd and replays across input
   assert.equal(next.structuredContent.reply, `continued(${state.thread_id}): follow-up\n`);
 });
 
+test('actual MCP resources expose exact reply bytes, stable links across restart and explicit read errors', async (t) => {
+  const dir = freshDir();
+  let connection = await startClient({ stateDir: dir });
+  t.after(async () => {
+    await connection.client.close();
+    await fsp.rm(dir, { recursive: true, force: true });
+  });
+  const message = 'diff --git a/a b/a\r\n- staré\t \r\n+ 新しい 😀 e\u0301\t  \r\n\n';
+  const args = { conversation_id: 'Bytes-A', message, request_id: 'exact-1' };
+  const first = await connection.client.callTool({ name: 'codex_turn', arguments: args });
+  assert.notEqual(first.isError, true);
+  const expected = Buffer.from(`started: ${message}`, 'utf8');
+  assert.equal(first.structuredContent.reply, `started: ${message}`);
+  assert.equal(first.content[0].text, `started: ${message}`);
+  const descriptor = first.structuredContent.reply_artifact;
+  assert.equal(descriptor.sha256, crypto.createHash('sha256').update(expected).digest('hex'));
+  assert.equal(descriptor.byte_length, expected.length);
+  assert.equal(descriptor.conversation_id, args.conversation_id);
+  assert.equal(descriptor.request_id, args.request_id);
+  assert.equal(descriptor.turn, 1);
+  assert.equal(first.content[1].type, 'resource_link');
+  assert.equal(first.content[1].uri, descriptor.uri);
+  assert.equal(first.content[1].size, expected.length);
+  const templates = await connection.client.listResourceTemplates();
+  assert.equal(templates.resourceTemplates[0].uriTemplate, 'codex-bridge://reply/c-{conversation_id}/{operation_key}');
+  assert.deepEqual(await connection.client.listResources(), { resources: [] });
+  const resource = await connection.client.readResource({ uri: descriptor.uri });
+  assert.equal(resource.contents.length, 1);
+  assert.equal(resource.contents[0].uri, descriptor.uri);
+  assert.equal(resource.contents[0].mimeType, descriptor.mimeType);
+  assert.deepEqual(Buffer.from(resource.contents[0].blob, 'base64'), expected);
+  await connection.client.close();
+  connection = await startClient({ stateDir: dir, stubMode: 'fail-start' });
+  assert.deepEqual(await connection.client.readResource({ uri: descriptor.uri }), resource);
+  assert.deepEqual(await connection.client.callTool({ name: 'codex_turn', arguments: args }), first);
+  await assert.rejects(connection.client.readResource({ uri: 'file:///unrelated' }), { code: -32602 });
+  await assert.rejects(connection.client.readResource({ uri: descriptor.uri.replace('Bytes-A', 'bytes-a') }), { code: -32002 });
+  await assert.rejects(connection.client.readResource({ uri: descriptor.uri + '?other=1' }), { code: -32602 });
+  const identityKey = require('../lib/paths').identityKey('Bytes-A');
+  const operationKey = descriptor.uri.split('/').at(-1);
+  const file = path.join(dir, `${identityKey}.replies`, `${operationKey}.utf8`);
+  await fsp.writeFile(file, Buffer.alloc(expected.length, 120));
+  await assert.rejects(connection.client.readResource({ uri: descriptor.uri }), /CORRUPT_REPLY_ARTIFACT/);
+  const failedReplay = await connection.client.callTool({ name: 'codex_turn', arguments: args });
+  assert.equal(readError(failedReplay).code, 'CORRUPT_REPLY_ARTIFACT');
+});
+
 test('invalid MCP envelopes/arguments/unknown tools fail before disk or backend side effects', async (t) => {
   const dir = freshDir();
   const { client } = await startClient({ stateDir: dir, stubMode: 'fail-start' });
@@ -163,7 +211,7 @@ test('codex_turn tool is listed with the correct input/output schema', async (t)
   // Output schema advertises reply/thread_id/turn.
   assert.ok(tool.outputSchema, 'has outputSchema');
   const out = tool.outputSchema.properties;
-  assert.ok(out.reply && out.thread_id && out.turn, 'output has reply, thread_id, turn');
+  assert.ok(out.reply && out.thread_id && out.turn && out.reply_artifact, 'output retains reply, thread_id, turn and adds reply_artifact');
 });
 
 test('request_id replay survives MCP server restart and conflicts return tool errors', async (t) => {

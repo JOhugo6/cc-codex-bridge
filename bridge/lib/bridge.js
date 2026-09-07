@@ -103,7 +103,7 @@ class CodexBridge {
           ? { message, provider: this.provider, working_dir_policy: 'pinned', working_dir: opts.working_dir === undefined
             ? recorded.input.working_dir : await workingDir.normalize(opts.working_dir, this.defaultWorkingDir) }
           : { message, provider: this.provider, working_dir: opts.working_dir ?? null };
-        const replay = operations.findReplay(journal, opts.request_id, replayInput);
+        const replay = await operations.findReplay(journal, opts.request_id, replayInput);
         if (replay) return replay;
       }
       operations.assertComplete(journal, conversationId);

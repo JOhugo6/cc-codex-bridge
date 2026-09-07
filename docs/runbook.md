@@ -4,7 +4,7 @@
 
 > Doplněk k design doku `design.md`. Tato příručka pokrývá provoz **membership vrstvy**: relay agenta `codex-peer` (`~/.claude/agents/codex-peer.md`) a deterministického MCP mostu (`codex-bridge`).
 >
-> **Tool kontrakt (pevný):** bridge je zaregistrovaný jako MCP server `codex_bridge` a vystavuje jeden nástroj, surfacující k agentům jako **`mcp__codex_bridge__codex_turn`**, se signaturou `codex_turn({envelope})` / `codex_turn({conversation_id, message, working_dir?, request_id?}) -> { reply, thread_id, turn }`.
+> **Tool kontrakt (pevný):** bridge je zaregistrovaný jako MCP server `codex_bridge` a vystavuje jeden nástroj, surfacující k agentům jako **`mcp__codex_bridge__codex_turn`**, se signaturou `codex_turn({envelope})` / `codex_turn({conversation_id, message, working_dir?, request_id?}) -> { reply, thread_id, turn, reply_artifact }`.
 >
 > **Architektura jednou větou:** jiný Claude sub-agent → `SendMessage` → `codex-peer` (tenká slupka) → MCP volání `codex_turn` → `codex-bridge` (deterministický, drží `thread_id` na disku) → Codex CLI → odpověď zpět, vrácená verbatim.
 >
@@ -53,7 +53,7 @@ Opakování dokončené migrace nic nepřepíše. Přerušenou migraci lze zopak
 
 ### Opakované doručení a obnova operace
 
-Přímý volající `codex_turn` může předat volitelné `request_id` (1–200 písmen, číslic, `.`, `_`, `-`). Pro každý zamýšlený tah zvol nové ID; stejné použij pouze při opakovaném doručení téhož požadavku. ID rozlišuje velikost písmen a platí v rámci přesného `conversation_id`. Stejné ID s jinou zprávou, výsledným kanonickým `working_dir` nebo providerem vrátí `REQUEST_ID_CONFLICT`. Vynechané cwd při opakování zdědí adresář původního požadavku; ekvivalentní explicitní cesta také vrátí původní výsledek. Záznamy journalu z doby před ukládáním cwd zachovávají původní porovnání surového vstupu, včetně rozdílu mezi vynecháním a předáním cwd. Dokončený požadavek vrátí původní `{reply, thread_id, turn}` včetně whitespace, i po restartu procesu nebo dalších tazích; neopakuje backendové volání ani nemění stav. Volání bez `request_id` zachovávají původní rozhraní: každé úspěšné volání je nový tah, takže ztrátu odpovědi po úspěšném dokončení nelze deduplikovat. Volající relay agenta předá tutéž volitelnou hodnotu jako `; REQUEST_ID: <id>` na prvním řádku hlavičky, viz níže.
+Přímý volající `codex_turn` může předat volitelné `request_id` (1–200 písmen, číslic, `.`, `_`, `-`). Pro každý zamýšlený tah zvol nové ID; stejné použij pouze při opakovaném doručení téhož požadavku. ID rozlišuje velikost písmen a platí v rámci přesného `conversation_id`. Stejné ID s jinou zprávou, výsledným kanonickým `working_dir` nebo providerem vrátí `REQUEST_ID_CONFLICT`. Vynechané cwd při opakování zdědí adresář původního požadavku; ekvivalentní explicitní cesta také vrátí původní výsledek. Záznamy journalu z doby před ukládáním cwd zachovávají původní porovnání surového vstupu, včetně rozdílu mezi vynecháním a předáním cwd. Dokončený požadavek vrátí původní `{reply, thread_id, turn, reply_artifact}` včetně whitespace, i po restartu procesu nebo dalších tazích; neopakuje backendové volání ani nemění stav. Volání bez `request_id` zachovávají původní rozhraní: každé úspěšné volání je nový tah, takže ztrátu odpovědi po úspěšném dokončení nelze deduplikovat. Volající relay agenta předá tutéž volitelnou hodnotu jako `; REQUEST_ID: <id>` na prvním řádku hlavičky, viz níže.
 
 Journal `v2@<sha256>.operations.json` se zapisuje před vstupním transcriptem i backendovým voláním. Poslední operace prochází stavy `pending` → `received` → `completed`. `received` obsahuje přesnou odpověď a cílový stav; `completed` se uloží až po dokončení zápisu stavu i transcriptu. Timeout nebo chyba transportu mohou nastat až po provedení vzdálené operace, proto zůstává stav `pending`. Následující volání skončí chybou `OPERATION_UNCERTAIN` nebo `OPERATION_INCOMPLETE` před kontaktováním Codexu. Jiné request ID tuto blokaci neobchází. Chybějící či poškozený journal nebo rozpor se stavem rovněž blokují pokračování.
 
@@ -69,6 +69,32 @@ node recover-operation.js finish 'Review-A'
 Operace `pending` **nemá zaznamenanou autoritativní odpověď**. `finish` ji odmítne: backend ji mohl provést, i když neexistuje stav nebo výstupní transcript. Zachovej journal a historii backendu pro vyšetření a ověřenou rekonstrukci operátorem; tento příkaz nedokáže nejistotu rozhodnout ani bezpečně zopakovat prompt. Automatické resetování či zapomenutí operace není podporováno. Nemaž stav, neměň conversation ID ani neobnovuj starší snapshot jen kvůli odstranění chyby. Při poškozeném stavu či neúplném/konfliktním transcriptu zachovej poškozené soubory a obnov pouze data ověřená vůči zaznamenané operaci (nebo konzistentní záloze), pak opakuj `finish`. Odpověď v journalu umožňuje rekonstruovat řádek transcriptu dané operace, nikoli historii před zavedením journalu.
 
 Záruky pokrývají pád a restart procesu bridge při zachování souborů a dodržování zámku všemi zapisujícími procesy. Zápisy journalu/stavu flushují obsah souboru před atomickým přejmenováním; POSIX flushuje i adresářový záznam. Na Windows zde není přenositelný flush adresáře, proto mají náhlý výpadek napájení a selhání filesystemu/hardware slabší záruky. Udržuj zálohy. Journal zachovává všechny požadavky a výsledky kvůli starším request ID; roste s historií a přepisuje se při přechodech stavu. Neprořezávej jej odděleně od stavu/transcriptů a nevracej se ke starší verzi bridge, která journal ignoruje.
+
+### Přesné bajty odpovědi a MCP resources
+
+Každý úspěšný výsledek zachovává `reply`, `thread_id` a `turn` a přidává `reply_artifact`: `{uri, mimeType, sha256, byte_length, conversation_id, operation_id, turn, request_id}`. Vynechané `request_id` má hodnotu `null`. Textový blok dál obsahuje odpověď; další MCP `resource_link` zpřístupňuje její URI. Metadata počítá kód bridge. URI váže přesné conversation ID a hash operation ID; opakované doručení vrací stejná metadata a bajty i po dalších tazích a restartu.
+
+Artefakt je přesně `Buffer.from(reply, 'utf8')` pro řetězec odpovědi backendu. CRLF/LF, koncový whitespace, normalizace Unicode i koncové nové řádky zůstávají zachované; nepřidává se BOM. Záruka se nevztahuje na původní transportní bajty backendu ani na prózu relay agenta. UTF-8 kódování Node nahrazuje nepárové UTF-16 surrogates znakem U+FFFD. Pro přesné diffy/kód použij resource nebo přímý výsledek nástroje zpracovaný kódem, bez dalšího přepisu LLM.
+
+Příklad s připojeným MCP klientem a existujícím úspěšným `toolResult`:
+
+```javascript
+const { createHash } = require('node:crypto');
+const { writeFile } = require('node:fs/promises');
+const a = toolResult.structuredContent.reply_artifact;
+const resource = await client.readResource({ uri: a.uri });
+const bytes = Buffer.from(resource.contents[0].blob, 'base64');
+if (bytes.length !== a.byte_length || createHash('sha256').update(bytes).digest('hex') !== a.sha256) {
+  throw new Error('Reply integrity check failed');
+}
+await writeFile('codex-reply.txt', bytes); // Zápis Bufferu zachová všechny bajty.
+```
+
+`resources/read` vrací jeden base64 blob s MIME typem `text/plain; charset=utf-8`, nevolá model a před vrácením ověří bajty vůči metadatům journalu. `resources/templates/list` inzeruje `codex-bridge://reply/c-{conversation_id}/{operation_key}`; použij přesné vrácené URI. `resources/list` je prázdné: resources se zpřístupňují odkazy ve výsledku nástroje bez výpisu historie konverzací. Neplatné URI vrací MCP `-32602`, neznámé/nedokončené resources `-32002`. Samotná textová odpověď relaye tyto odkazy nenese; aplikace musí zachovat podkladový MCP výsledek nebo volat bridge přímo.
+
+Soubory jsou v `<stateDir>/v2@<sha256(conversation_id)>.replies/<sha256(operation_id)>.utf8`. Bridge flushne dočasný soubor a publikuje jej hard linkem bez přepsání cíle (vyžaduje podporu hard linků NTFS/POSIX). Odpověď a metadata uloží do journalu ve stavu `received` před tvorbou artefaktu. Selhání zápisu/publikace vrací `OPERATION_PERSISTENCE_FAILED`; další tahy blokuje do dokončení lokálních zápisů přes `recover-operation.js inspect` / `finish`. Obnova neopakuje backendové volání. Pád procesu může zanechat neodkazovaný `.tmp.*` soubor; nejde o čitelné resource. Omezení při výpadku napájení na Windows zůstávají stejná jako u journalu.
+
+Poškozený obsah vrací `CORRUPT_REPLY_ARTIFACT` (MCP internal error) a soubor zůstane zachovaný; před replay/obnovou obnov ověřenou kopii. Chybějící soubor vrací `REPLY_ARTIFACT_MISSING`; opakování dokončeného `request_id` nebo `finish` poslední operace rekonstruuje stejné bajty z journalu. Stejné cesty doplní metadata do starších dokončených journal záznamů; původní reply/thread/turn, transcript a stav konverzace zachovají. Bez uložené odpovědi v journalu se historický artefakt nevymýšlí. SHA-256 odhaluje neshodu, nikoli úmyslnou změnu journalu i artefaktu místním účtem.
 
 ### Pracovní adresář a starší vlákna
 
@@ -149,7 +175,7 @@ SendMessage(
 )
 ```
 
-Odpověď, kterou dostaneš zpět, je pole `reply` od Codexu, verbatim. Považuj jeho obsah za Codexova slova, ne relay agenta.
+Relay má instrukci kopírovat pole `reply` od Codexu doslova. Jeho próza zůstává best effort; pro přesné bajty použij výše popsané MCP resource.
 
 ### Jak vypadá dialog
 ```
@@ -248,7 +274,7 @@ Podstatný požadavek: po tomto kroku relay agent NESMÍ mít kola 1–2 ve své
 | **Windows shim launch failure** — bridge nemůže spustit Codex; hang nebo "process exited" bez odpovědi | §6: `codex` je `.cmd` shim; bare `CreateProcess` na něm selže nebo zatuče | Spouštěj přes `cmd /c codex …` nebo absolutní cestu k `.cmd` (např. `C:\Users\<user>\AppData\Roaming\npm\codex.cmd`). Oprava na straně bridge. |
 | **Cold-start race** — první tah vrátí prázdno / timeout / "no session yet", pozdější tahy fungují | §6/§4.1.4: první volání závodí se spawnem `codex mcp-server`; příliš rychlý bridge vrátí dříve než dostane první reálnou odpověď | Bridge musí **blokovat až do první reálné odpovědi** a hard-errorovat při timeout — nikdy nevrátit fake / fresh-session placeholder. Oprava na straně bridge. |
 | **Cross-project / cross-thread bleed** — odpovědi z jiného týmu/konverzace se prolínají | §4.2/§8.3: dvě konverzace kolidovaly na stejném `conversation_id`, nebo sdílejí jeden `codex mcp-server` proces | Ujisti se, že operátor-dodaný `CONV_ID:` je unikátní per tým/konverzace. Ověř `transcript.jsonl` na proložené tahy z nesouvisejících témat. |
-| **Relay editorizuje** — odpověď je shrnutá/přeformátovaná, kód/diff zmrzačen | §2: relay LLM „zlepšil" výstup místo přeposlání | Selhání relay-promptu. Agent prompt to explicitně zakazuje; pokud se opakuje, integritně kritická data jsou stále nedotčená v **tool resultu** (`reply` pole) / `transcript.jsonl` — vytáhni je odtud. |
+| **Relay editorizuje** — odpověď je shrnutá/přeformátovaná, kód/diff zmrzačen | §2: relay LLM změnil výstup | Načti `reply_artifact.uri` přímo přes MCP `resources/read` a ověř SHA-256/délku v kódu. Resource zachovává bajty odpovědi bridge. |
 | **Nástroj nenalezen** — relay erroruje, že `mcp__codex_bridge__codex_turn` není dostupný | §1 prereq #5: bridge není zaregistrován, server špatně pojmenován, nebo session nebyla restartována | Spusť `install.ps1`; potvrď, že `claude mcp list` ukazuje `codex_bridge: ✓ Connected`; restartuj Claude Code session. Název serveru musí být přesně `codex_bridge`. |
 
 ---
@@ -256,7 +282,7 @@ Podstatný požadavek: po tomto kroku relay agent NESMÍ mít kola 1–2 ve své
 ## 6. Honest limitations
 
 - **Adresovatelný člen ≠ symetrický peer.** `codex-peer` je „Claude řídí nástroj s visačkou jména", ne autonomní spoluhráč. Turn-taking, cíl a ukončení všechny žijí na Claude straně. Codex je reactive-only ve v1 — nikdy neiniciuje, protože jinak by nikdo nevlastnil rozhodnutí zastavit.
-- **„Verbatim" je best-effort.** Relay je LLM; prompt zakazuje úpravy, ale věrnost není byte-garantovaná. Pro cokoliv integritně kritického (diffy, kód, strukturovaný výstup) je autoritativní kopie **tool result pole `reply`** a bridge `transcript.jsonl`, ne próza relay agenta.
+- **„Verbatim" je u relaye best-effort.** Prompt zakazuje úpravy, ale próza LLM nemá bajtovou záruku. Neměnné **MCP resource `reply_artifact`** je autoritativním UTF-8 kódováním řetězce odpovědi bridge; diffy, kód a strukturovaná data načítej a ověřuj přímo kódem.
 - **Žádná self-vynucená bezpečnost.** Relay nedrží žádný stav a nevynucuje žádné limity. Všechna ukončení, cost, timeout a loop pojistky (§3) jsou zodpovědností orchestrátoru/člověka.
 - **Klíč kontinuity dodává operátor, ne relay.** Relay neslugguje ani nehaduje `conversation_id` — adresující agent MUSÍ poslat `CONV_ID: <stable-id>` jako první řádek, a kód bridge ho extrahuje z nezměněné obálky (viz §2). To je záměrné: disk-state klíč musí být byte-identický napříč relay re-instanciací, a LLM je špatná komponenta pro jeho rekonstrukci.
 - **v1 izolace je pouze na úrovni vlákna — NE na úrovni procesu/sandboxu.** V tomto milníku bridge obsluhuje VŠECHNY konverzace JEDNÍM sdíleným `codex mcp-server` procesem; separace mezi konverzacemi je logické `conversation_id`/`thread_id` klíčování, nikoli OS-level process isolace. Každé nové vlákno má ověřené, pevně uložené cwd a sandbox je **read-only**. Uložení cwd neomezuje přístup k souborovému systému. NEROZSIRUJ sandbox, dokud bridge neposkytne per-conversation process isolation + working-directory allow-list.

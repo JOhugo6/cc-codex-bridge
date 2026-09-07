@@ -7,6 +7,7 @@
 //     v2@<sha256(exact conversation_id)>.json              state including original conversation_id
 //     v2@<sha256(exact conversation_id)>.transcript.jsonl  transcript
 //     v2@<sha256(exact conversation_id)>.operations.json   durable requests and responses
+//     v2@<sha256(exact conversation_id)>.replies/<sha256(operation_id)>.utf8  immutable replies
 //     v2@<sha256(exact conversation_id)>.lock              advisory file lock (mkdir-based)
 // '@' cannot occur in a legacy id, keeping the two namespaces disjoint.
 //

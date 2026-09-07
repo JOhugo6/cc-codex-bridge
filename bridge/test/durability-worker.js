@@ -3,10 +3,17 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const store = require('../lib/store');
+const fsp = require('node:fs/promises');
 const { CodexBridge } = require('../lib/bridge');
 const [id, fault = '', message = 'hello', requestId = 'request-1'] = process.argv.slice(2);
 
 function crash(point) { if (fault === point) process.exit(73); }
+const link = fsp.link;
+fsp.link = async (...args) => {
+  crash('artifact:before');
+  await link(...args);
+  crash('artifact:after');
+};
 const write = store.writeJsonAtomic;
 store.writeJsonAtomic = async (file, data) => {
   const stage = file.endsWith('.operations.json') ? data.operations.at(-1).status : 'state';

@@ -69,6 +69,8 @@ The relay forwards the complete message as `codex_turn({envelope: "CONV_ID: ...\
 
 ### In a Claude Code team
 
+For exact diffs/code, retain the direct MCP result: `reply_artifact` provides an immutable UTF-8 resource URI, SHA-256, byte length and turn identity. Retrieve it with `resources/read` and verify the decoded bytes in code; the relay's prose is best effort. See [exact reply retrieval](docs/runbook.en.md#exact-reply-bytes-and-mcp-resources).
+
 ```python
 # Example: orchestrator sends a message to codex-peer
 SendMessage(to="codex-peer", message="""CONV_ID: sprint42--arch-review

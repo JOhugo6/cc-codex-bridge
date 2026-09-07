@@ -73,7 +73,7 @@ for (const fault of ['pending:after', 'in:before', 'in:after', 'backend:after', 
   });
 }
 
-for (const fault of ['received:after', 'state:before', 'state:after', 'out:before', 'out:after', 'completed:before', 'completed:after']) {
+for (const fault of ['received:after', 'artifact:before', 'artifact:after', 'state:before', 'state:after', 'out:before', 'out:after', 'completed:before', 'completed:after']) {
   test(`restart after crash at ${fault} finishes only local writes and preserves exact reply`, async (t) => {
     const env = freshStateDir(); t.after(() => env.cleanup());
     assert.equal(worker('recoverable', fault).status, 73);

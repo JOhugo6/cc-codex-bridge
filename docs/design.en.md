@@ -52,7 +52,7 @@ Three layers, clearly separated:
 The bridge is a **thin custom stdio MCP server** that owns state. It exposes **one** tool:
 
 ```
-codex_turn({ envelope: string }) -> { reply: string, thread_id: string, turn: int }
+codex_turn({ envelope: string }) -> { reply: string, thread_id: string, turn: int, reply_artifact: object }
 codex_turn({ conversation_id: string, message: string, working_dir?: string, request_id?: string }) -> same result
 ```
 
@@ -61,7 +61,7 @@ The two input modes are exclusive; unknown arguments fail. The relay passes the 
 Behavior (deterministic, no LLM):
 1. Lock the state file for `conversation_id` (file lock — global scope = concurrent access from multiple teams).
 2. If there is **no** stored `thread_id` for `conversation_id` → start a session and save `thread_id`. Otherwise continue the existing one.
-3. Call Codex, capture the reply, **append to `transcript.jsonl`**, unlock, return `reply` + metadata.
+3. Call Codex, journal its reply and artifact metadata, publish immutable UTF-8 bytes, commit state/transcript and mark the operation completed. Unlock and return `reply` + metadata. A local failure is recovered from the recorded response without repeating the backend call.
 4. If a session cannot be obtained/restored → **return a loud error** (never silently "new session" — that is the amnesia).
 
 **Backing for Codex:** the bridge spawns a native `codex mcp-server` as a child and speaks MCP to it — `codex()` (returns `structuredContent.threadId`) and `codex-reply(threadId, …)`. The thread keeps the conversation **and file state** coherent.
@@ -69,6 +69,8 @@ Behavior (deterministic, no LLM):
 > **Note:** The `codex exec resume <session>` alternative has a known hang bug — do not use as primary.
 
 ### 4.2 State on disk (NOT in LLM context)
+
+Each completed response also has `<identityKey>.replies/<sha256(operation_id)>.utf8`. The tool's `reply_artifact` includes a durable MCP URI, SHA-256, byte length and conversation/operation/turn/request identity. `resources/read` verifies the file and returns a base64 blob of `Buffer.from(reply, 'utf8')`, directly to the client. The relay is instructed to copy the reply, but its generated prose carries no byte guarantee. See [exact retrieval and recovery](runbook.en.md#exact-reply-bytes-and-mcp-resources).
 
 ```
 ~/.claude/state/codex-bridge/

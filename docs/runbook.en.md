@@ -4,7 +4,7 @@
 
 > Companion to the design doc `design.en.md`. This runbook covers how to operate the **membership layer**: the `codex-peer` relay agent (`~/.claude/agents/codex-peer.md`) and the deterministic MCP bridge (`codex-bridge`).
 >
-> **Tool contract (fixed):** the bridge is registered as MCP server `codex_bridge` and exposes one tool, surfacing to agents as **`mcp__codex_bridge__codex_turn`**, with signature `codex_turn({envelope})` / `codex_turn({conversation_id, message, working_dir?, request_id?}) -> { reply, thread_id, turn }`.
+> **Tool contract (fixed):** the bridge is registered as MCP server `codex_bridge` and exposes one tool, surfacing to agents as **`mcp__codex_bridge__codex_turn`**, with signature `codex_turn({envelope})` / `codex_turn({conversation_id, message, working_dir?, request_id?}) -> { reply, thread_id, turn, reply_artifact }`.
 >
 > **Architecture in one line:** another Claude sub-agent → `SendMessage` → `codex-peer` (thin relay) → `codex_turn` MCP call → `codex-bridge` (deterministic, holds `thread_id` on disk) → Codex CLI → reply back up the chain, returned verbatim.
 >
@@ -53,7 +53,7 @@ Repeating a completed migration changes nothing. An interrupted migration can be
 
 ### Request redelivery and operation recovery
 
-Direct `codex_turn` callers may pass an optional `request_id` (1–200 letters, digits, `.`, `_`, `-`). Choose a new ID for each intended turn, and reuse it only when redelivering that same request. IDs are case-sensitive and scoped to the exact `conversation_id`. Reusing an ID with a different message, effective canonical `working_dir`, or provider returns `REQUEST_ID_CONFLICT`. Omitting cwd on replay inherits that request's saved directory; an equivalent explicit path also replays. Pre-directory-policy journal records retain their original raw-input comparison, including omitted versus supplied cwd. A completed request returns the original `{reply, thread_id, turn}`, including whitespace, even after process restart or later turns; replay changes no state and calls no backend. Calls without `request_id` keep the existing interface: each successful call is a new turn, so a response lost after successful completion cannot be deduplicated. Relay callers supply the same optional value as `; REQUEST_ID: <id>` on the first header line, as described below.
+Direct `codex_turn` callers may pass an optional `request_id` (1–200 letters, digits, `.`, `_`, `-`). Choose a new ID for each intended turn, and reuse it only when redelivering that same request. IDs are case-sensitive and scoped to the exact `conversation_id`. Reusing an ID with a different message, effective canonical `working_dir`, or provider returns `REQUEST_ID_CONFLICT`. Omitting cwd on replay inherits that request's saved directory; an equivalent explicit path also replays. Pre-directory-policy journal records retain their original raw-input comparison, including omitted versus supplied cwd. A completed request returns the original `{reply, thread_id, turn, reply_artifact}`, including whitespace, even after process restart or later turns; replay changes no state and calls no backend. Calls without `request_id` keep the existing interface: each successful call is a new turn, so a response lost after successful completion cannot be deduplicated. Relay callers supply the same optional value as `; REQUEST_ID: <id>` on the first header line, as described below.
 
 The `v2@<sha256>.operations.json` journal is written before the inbound transcript or backend call. Its last operation moves through `pending` → `received` → `completed`. `received` contains the exact response and intended state; `completed` is saved only after state and transcript writes finish. A timeout or transport error may follow a remote side effect, so it leaves the operation `pending`. Subsequent calls fail with `OPERATION_UNCERTAIN` or `OPERATION_INCOMPLETE` before contacting Codex. A different request ID does not bypass this block. Missing/corrupt journals or state that disagrees with the journal also fail closed.
 
@@ -69,6 +69,32 @@ node recover-operation.js finish 'Review-A'
 A `pending` operation has **no recorded authoritative response**. `finish` refuses it: the backend may have executed even if no state or output transcript exists. Preserve the journal and backend history for investigation and reconciliation by the operator; this command cannot resolve that uncertainty or safely resend the prompt. There is deliberately no automatic reset/forget option. Do not delete state, change the conversation ID, or restore an older snapshot merely to make the error disappear. For corrupt state or a torn/conflicting transcript, preserve the damaged files and restore only data verified against the recorded operation (or a consistent backup) before running `finish` again. A journal response can support reconstruction of that operation's transcript entry; it cannot reconstruct history predating the journal.
 
 These guarantees cover bridge process crashes and restart while its files are preserved and cooperating processes use the conversation lock. Journal/state writes flush file contents before atomic rename; POSIX also flushes the directory entry. Windows provides no portable directory flush here, so abrupt power loss and filesystem/hardware failure have weaker guarantees. Keep backups. The journal retains all requests and results to support old request IDs; it grows with history and is rewritten per transition. Do not prune it independently of state/transcripts, and do not downgrade to an older bridge that ignores the journal.
+
+### Exact reply bytes and MCP resources
+
+Every successful tool result retains `reply`, `thread_id` and `turn`, and adds `reply_artifact`: `{uri, mimeType, sha256, byte_length, conversation_id, operation_id, turn, request_id}`. `request_id` is `null` when omitted. The text content block still contains the reply; an additional MCP `resource_link` exposes its URI. Metadata comes from bridge code, never from an LLM. The URI binds the exact conversation ID and hashed operation ID; repeated delivery returns the same descriptor and bytes, including after later turns and restarts.
+
+The artifact is exactly `Buffer.from(reply, 'utf8')` for the backend reply string. CRLF/LF, trailing whitespace, Unicode normalization and final newlines are unchanged; no BOM is added. This does not promise upstream transport bytes or bytes in the relay's generated prose. Node's UTF-8 encoding replaces any unpaired UTF-16 surrogate with U+FFFD. Clients needing exact diffs/code must consume the resource or direct tool result in code, rather than copy an LLM response.
+
+Use a connected MCP client and the existing successful `toolResult`:
+
+```javascript
+const { createHash } = require('node:crypto');
+const { writeFile } = require('node:fs/promises');
+const a = toolResult.structuredContent.reply_artifact;
+const resource = await client.readResource({ uri: a.uri });
+const bytes = Buffer.from(resource.contents[0].blob, 'base64');
+if (bytes.length !== a.byte_length || createHash('sha256').update(bytes).digest('hex') !== a.sha256) {
+  throw new Error('Reply integrity check failed');
+}
+await writeFile('codex-reply.txt', bytes); // Buffer write preserves every byte
+```
+
+`resources/read` returns one base64 blob with MIME type `text/plain; charset=utf-8`; it performs no model call and verifies the persisted bytes against journal metadata before returning them. `resources/templates/list` advertises `codex-bridge://reply/c-{conversation_id}/{operation_key}`; use the returned URI verbatim. `resources/list` is empty: resources are discovered through tool links, without listing conversation history. Malformed URIs fail with MCP `-32602`; unknown/uncompleted resources fail with `-32002`. The relay's prose-only response does not carry these links; the calling application must retain the underlying MCP tool result or use the bridge directly.
+
+Files live at `<stateDir>/v2@<sha256(conversation_id)>.replies/<sha256(operation_id)>.utf8`. Publication uses a flushed temporary file and a no-replace hard link (NTFS/POSIX hard-link support required); conflicting files are never overwritten. The response and descriptor are journaled as `received` before artifact creation. A write/publication failure returns `OPERATION_PERSISTENCE_FAILED`; further turns remain blocked until `recover-operation.js inspect` / `finish` completes local persistence. Recovery never repeats the backend call. A process crash can leave an unreferenced `.tmp.*` file; it is not a readable resource. Windows power-loss limits are the same as the journal's.
+
+Read-time corruption returns `CORRUPT_REPLY_ARTIFACT` (MCP internal error) and preserves the file; restore a verified copy before replay/recovery. A missing file returns `REPLY_ARTIFACT_MISSING`; replaying its completed `request_id`, or `finish` for the latest operation, recreates the same bytes from the journal. Old completed journal records without artifact metadata are upgraded by those same paths; their original reply/thread/turn, transcript and conversation state are preserved. Without a saved journal response, no historical artifact is invented. A SHA-256 check detects mismatches, not malicious changes to both the journal and artifact by a local account.
 
 ### Working directory and legacy threads
 
@@ -149,7 +175,7 @@ SendMessage(
 )
 ```
 
-The reply you receive back is Codex's `reply` field, verbatim. Treat its content as Codex's words, not the relay's.
+The relay is instructed to copy Codex's `reply` field verbatim. Its prose remains best effort; use the MCP resource above when exact bytes matter.
 
 ### What a back-and-forth looks like
 ```
@@ -248,7 +274,7 @@ The essential requirement: after this step the relay agent must NOT have rounds 
 | **Windows shim launch failure** — bridge can't start Codex; hang or "process exited" with no reply | §6: `codex` is a `.cmd` shim; bare `CreateProcess` on it fails or hangs | Launch via `cmd /c codex …` or the absolute path to `codex.cmd` (e.g. `C:\Users\ai\AppData\Roaming\npm\codex.cmd`). Bridge-side fix. |
 | **Cold-start race** — first turn returns empty / times out / "no session yet", later turns work | §6/§4.1.4: the first call races the spawn of `codex mcp-server` (and its own downstream MCP servers); a too-eager bridge returns before the first real reply | Bridge must **block until the first real response** and hard-error on timeout — never return a fake / fresh-session placeholder. Bridge-side fix. |
 | **Cross-project / cross-thread bleed** — answers from another team/conversation leak in | §4.2/§8.3: two conversations collided on the same `conversation_id`, or shared one `codex mcp-server` process (in v1 a SINGLE shared process backs all conversations) | Ensure the operator-supplied `CONV_ID:` is unique per team/conversation. Check `transcript.jsonl` for interleaved turns from unrelated topics. |
-| **Relay editorializes** — reply is summarized/reformatted, code/diff mangled | §2: the relay LLM "improved" the output instead of passing it through | This is a relay-prompt failure. The agent prompt forbids it explicitly; if it recurs, the integrity-critical payload is still intact in the **tool result** (`reply` field) / `transcript.jsonl` — pull it from there. |
+| **Relay editorializes** — reply is summarized/reformatted, code/diff mangled | §2: the relay LLM changed the output | Read `reply_artifact.uri` directly with MCP `resources/read` and verify its SHA-256/byte length in code. The resource preserves the bridge reply bytes. |
 | **Tool not found** — relay errors that `mcp__codex_bridge__codex_turn` is unavailable | §1 prereq #5: bridge not registered, server named wrong, or session not restarted | Run `install.ps1`; confirm `claude mcp list` shows `codex_bridge: ✓ Connected`; restart the Claude Code session. The server name must be exactly `codex_bridge`. |
 
 ---
@@ -256,7 +282,7 @@ The essential requirement: after this step the relay agent must NOT have rounds 
 ## 6. Honest limitations
 
 - **Addressable member ≠ symmetric peer.** `codex-peer` is "Claude driving a tool that wears a name tag," not an autonomous teammate. Turn-taking, the goal, and termination all live on the Claude side. Codex is reactive-only in v1 — it never initiates, because if it did, no one would own the decision to stop.
-- **"Verbatim" is best-effort.** The relay is an LLM; the prompt forbids editing, but faithfulness is not byte-guaranteed. For anything integrity-critical (diffs, code, structured output), the authoritative copy is the **tool result `reply` field** and the bridge `transcript.jsonl`, not the relay's prose.
+- **"Verbatim" is best-effort for the relay.** Its prompt forbids editing, but LLM prose is not byte-guaranteed. The immutable **`reply_artifact` MCP resource** is the authoritative UTF-8 encoding of the bridge reply string; consume and verify it directly in code for diffs, code and structured output.
 - **No self-enforced safety.** The relay holds no state and enforces no limits. All termination, cost, timeout, and loop guardrails (§3) are the orchestrator's/human's responsibility.
 - **The continuity key is operator-supplied, not relay-derived.** The relay does NOT slugify or guess a `conversation_id` — the addressing agent MUST send `CONV_ID: <stable-id>` as the first line, and bridge code extracts it from the unchanged envelope (see §2). This is deliberate: the disk-state key must be byte-identical across relay re-instantiation, and an LLM is the wrong component to reconstruct it. The cost is a contract obligation on every caller; omitting `CONV_ID:` yields a loud error, never a silent guessed key.
 - **v1 isolation is thread-level only — NOT process/sandbox-level.** In this milestone the bridge backs ALL conversations with ONE shared `codex mcp-server` process; separation between conversations is logical `conversation_id`/`thread_id` keying, not OS-level process isolation. Each new thread has a validated, pinned cwd and the sandbox is **read-only**. Cwd pinning is not a filesystem access boundary. Do NOT widen the sandbox until the bridge provides per-conversation process isolation + a working-directory allow-list.
