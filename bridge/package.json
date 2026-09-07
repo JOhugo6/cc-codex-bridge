@@ -10,7 +10,8 @@
   },
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/bridge.test.js test/codex-backend.test.js test/mcp-server.test.js test/lock.test.js test/identity.test.js test/durability.test.js test/working-dir.test.js test/turn-input.test.js test/reply-artifacts.test.js",
+    "test": "node --test test/bridge.test.js test/codex-backend.test.js test/mcp-server.test.js test/lock.test.js test/identity.test.js test/durability.test.js test/working-dir.test.js test/turn-input.test.js test/reply-artifacts.test.js test/claude-config.test.js",
+    "doctor": "node doctor.js",
     "smoke": "node --test test/live-smoke.test.js"
   },
   "engines": {
@@ -19,5 +20,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "yaml": "^2.9.0"
   }
 }

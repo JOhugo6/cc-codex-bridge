@@ -22,13 +22,9 @@ Umět zapojit **OpenAI Codex CLI** jako **adresovatelného člena Claude Code t�
 
 A upřímně: tohle dá **adresovatelného člena, ne symetrického peera**. Realita je „Claude řídí nástroj s visačkou jména" — turn-taking, cíl i ukončení žijí na Claude straně.
 
-## 3. Ověřená fakta o Claude Code (předpoklady)
+## 3. Předpoklady integrace Claude Code
 
-- **Externí proces nelze** nativně zaregistrovat jako člena týmu → jediná cesta = MCP most + relay agent.
-- Vícekolová `SendMessage` konverzace (dlouhožijící adresovatelný účastník) funguje **jen s** `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. Bez toho je sub-agent fire-once.
-- Vlastní agenti globálně: `~/.claude/agents/*.md` (YAML frontmatter: `name`, `description`, `tools`, `disallowedTools`, `model`, `mcpServers`; tělo = system prompt). Rekurzivně objevováno, dostupné ve všech projektech.
-- Sub-agent může **současně** volat MCP nástroje (přes `mcpServers` frontmatter / globální registraci) **a** komunikovat přes `SendMessage`.
-- Globální MCP registrace: `claude mcp add --transport stdio --scope user <name> -- <cmd>` (zapisuje do `~/.claude.json`).
+Načítání MCP a doručení odpovědi závisejí na režimu spuštění a verzi Claude. Viz udržovaná [matice režimů a ověření](claude-modes.md). Běžný subagent vrací finální odpověď a lze ho znovu spustit se stejným CONV_ID; kontinuita nepotřebuje týmy. Teammate doručuje přes SendMessage. In-process teammate potřebuje MCP registraci session, protože ignoruje mcpServers agenta. Lifecycle týmů a obnovení subagentů se po zdejší 2.1.126 měnily; nejde o trvale platné záruky.
 
 ## 4. Architektura
 
@@ -119,13 +115,13 @@ Každá dokončená odpověď má také `<identityKey>.replies/<sha256(operation
    ```
 2. **`codex-bridge`** — tenký stdio MCP server (Node) dle §4.1–4.2. Registrace:
    ```
-   claude mcp add --transport stdio --scope user codex_bridge -- cmd /c node "C:\Users\ai\.claude\bridges\codex-bridge\index.js"
+   claude mcp add --transport stdio --scope user codex_bridge -- "C:\Program Files\nodejs\node.exe" "C:\Users\ai\.claude\bridges\codex-bridge\index.js"
    ```
 3. Zapnout `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` (ověřit, že už je).
 
 ## 6. Windows nástrahy (konkrétně)
 
-- `codex` je skoro jistě `.cmd` shim → bare CreateProcess selže nebo zatuhne; spouštěj přes **`cmd /c codex …`** nebo absolutní cestu k `.cmd` (např. `C:\Users\<user>\AppData\Roaming\npm\codex.cmd`). (Nejčastější příčina selhání stdio MCP na Windows.)
+- Windows používá nativní codex.exe (i z npm platform package) a verzovaný Windows PowerShell 5.1 Job Object supervisor. MCP registrace i inline definice agenta spouštějí nativní node.exe se samostatnými argumenty bez cmd /c; JSON/YAML escapování zachovává cesty s mezerami.
 - V user-scope configu **absolutní cesty**; `~`/`$HOME`/POSIX cesty se neexpandují.
 - V YAML frontmatteru (`mcpServers.args`) používej **forward slashes** (`C:/Users/...`), ne backslashes — backslashes v YAML způsobují tiché selhání parsování a bridge se nespustí.
 - stdio = newline-delimited JSON → vynuť **UTF-8 bez BOM a LF**; veškerý chatter CLI na **stderr** (na stdout jen MCP protokol, jinak rozbiješ stream — pozor i na bannery/`Write-Host`).

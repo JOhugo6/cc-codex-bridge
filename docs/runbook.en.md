@@ -12,23 +12,11 @@
 
 ---
 
-## 1. Prerequisites and how to verify them
+## 1. Prerequisites and connection checks
 
-Run each check before first use. All paths are absolute (Windows user-scope config does not expand `~`/`$HOME`).
+Read [Claude modes, installation and diagnostics](claude-modes.en.md) first. It distinguishes ordinary subagent, main `--agent`, in-process teammate and split-pane teammate, including tested versions. Agent Teams is only required for teammate mode. Install native Node 20+, native Claude CLI, authenticated Codex CLI and Windows PowerShell 5.1 with Add-Type support; install.ps1 also runs under PowerShell 7.
 
-| # | Prerequisite | Verify command (PowerShell) | Expected |
-|---|---|---|---|
-| 1 | Agent Teams enabled | `$env:CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | prints `1` |
-| 2 | Codex CLI installed | `(Get-Command codex).Source` | a path ending in `codex.cmd` (e.g. `C:\Users\ai\AppData\Roaming\npm\codex.cmd`) |
-| 3 | Codex authenticated | `codex login status` (or run one trivial `codex` turn) | reports a logged-in account, no auth prompt |
-| 4 | Node present (bridge runtime) | `node --version` | a version prints (bridge needs it) |
-| 5 | Bridge registered | `claude mcp list` | a line `codex_bridge: ... - ✓ Connected` |
-| 6 | Relay agent present | `Test-Path C:\Users\ai\.claude\agents\codex-peer.md` | `True` |
-
-Notes:
-- **#1** must be set in the environment that launches Claude Code, not just in a shell you opened afterwards. If it prints nothing, the multi-round `SendMessage` conversation will silently degrade to fire-once and the acceptance test cannot pass.
-- **#5** — registration is done by `install.ps1` (run it per the project instructions). It performs the equivalent of: `claude mcp add --transport stdio --scope user codex_bridge -- cmd /c node "C:\Users\ai\.claude\bridges\codex-bridge\index.js"`. The server name **must** be `codex_bridge` (underscore), otherwise the tool will not surface as `mcp__codex_bridge__codex_turn` and the relay agent's allowlist will not match. If `claude mcp list` shows the server but **not** `✓ Connected`, the relay will fail at first call — fix the bridge before proceeding (see Troubleshooting).
-- After registering or editing the agent file, **restart the Claude Code session** so the new MCP server and agent definition are picked up.
+Run `node "$env:USERPROFILE/.claude/bridges/codex-bridge/doctor.js"` to verify the actual registered MCP command initializes and exposes `codex_turn`; use the documented alternate config path for an isolated install. The bounded check creates no model turn and does not verify Codex login or a particular Claude session’s tool loading. Restart Claude after installing; confirm the tool in that session and run a relay request.
 
 ### Identity storage and upgrading the legacy layout
 
@@ -271,7 +259,7 @@ The essential requirement: after this step the relay agent must NOT have rounds 
 |---|---|---|
 | **Silent amnesia** — Codex acts like a stranger on a follow-up; round-3 token recall fails even though replies look healthy | §2 / §4.1.4: `thread_id` was held in LLM context (or relay changed `conversation_id`) and was lost on compaction; or the bridge silently started a NEW session instead of erroring | Confirm the bridge persists `thread_id` to `~/.claude/state/codex-bridge/v2@<sha256>.json` and reuses it; confirm the relay passes a constant `conversation_id` (check `transcript.jsonl` — the id must be identical every turn). Bridge must HARD-ERROR when it cannot restore a session, never open a fresh one. |
 | **Stdout pollution** — relay/tool call fails with JSON parse / protocol errors, garbled MCP responses | §6: CLI banners / `Write-Host` / non-protocol chatter leaked onto **stdout**; stdio MCP requires stdout to carry ONLY newline-delimited JSON | All CLI chatter must go to **stderr**; emit UTF-8 **without BOM**, LF line endings. Bridge-side fix. Verify by running the bridge command manually and confirming stdout is pure JSON-RPC. |
-| **Windows shim launch failure** — bridge can't start Codex; hang or "process exited" with no reply | §6: `codex` is a `.cmd` shim; bare `CreateProcess` on it fails or hangs | Launch via `cmd /c codex …` or the absolute path to `codex.cmd` (e.g. `C:\Users\ai\AppData\Roaming\npm\codex.cmd`). Bridge-side fix. |
+| **Windows native launch failure** | Native executable or Job Object helper unavailable | Reinstall Codex including its platform package, verify Windows PowerShell 5.1/Add-Type and both installed helper sources. The bridge resolves native codex.exe; no cmd wrapper is used. |
 | **Cold-start race** — first turn returns empty / times out / "no session yet", later turns work | §6/§4.1.4: the first call races the spawn of `codex app-server` (and its own downstream MCP servers); a too-eager bridge returns before the first real reply | Bridge must **block until the first real response** and hard-error on timeout — never return a fake / fresh-session placeholder. Bridge-side fix. |
 | **Cross-project / cross-thread bleed** — answers from another team/conversation leak in | §4.2/§8.3: two conversations collided on the same `conversation_id`, or shared one `codex app-server` process (in v1 a SINGLE shared process backs all conversations) | Ensure the operator-supplied `CONV_ID:` is unique per team/conversation. Check `transcript.jsonl` for interleaved turns from unrelated topics. |
 | **Relay editorializes** — reply is summarized/reformatted, code/diff mangled | §2: the relay LLM changed the output | Read `reply_artifact.uri` directly with MCP `resources/read` and verify its SHA-256/byte length in code. The resource preserves the bridge reply bytes. |

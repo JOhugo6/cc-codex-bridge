@@ -21,10 +21,10 @@ Other Claude sub-agent
 | Tool | Minimum version | Notes |
 |---|---|---|
 | Node.js | v20 | `node --version` |
-| Claude Code CLI | current | `claude --version`, must be authenticated |
+| Claude Code CLI | native 2.1.126 tested | see mode/version limits below; model calls require login |
 | OpenAI Codex CLI | v0.153.4 | `codex --version`, must be authenticated |
-| PowerShell | 7 (pwsh) | for install script |
-| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `=1` | set in your environment |
+| PowerShell | Windows 5.1 or 7 | installer; built-in 5.1 + Add-Type for backend |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `=1` | only for experimental teammates; ordinary subagents work without it |
 
 ## Install
 
@@ -38,11 +38,13 @@ Then **restart Claude Code** (agent definitions are cached at session start).
 
 The installer:
 1. Copies `bridge/` → `~/.claude/bridges/codex-bridge/`
-2. Runs `npm install`
+2. Runs `npm ci`
 3. Substitutes your actual path into `agent/codex-peer.md.template` → `~/.claude/agents/codex-peer.md`
 4. Registers the MCP server at user scope (`claude mcp add --scope user codex_bridge`)
 
 Re-run `.\install.ps1` after pulling updates — it is idempotent.
+
+Ordinary subagents return their final answer to the caller; team replies use `SendMessage`. The installer verifies the registered command with a real MCP handshake and tool listing, without calling Codex. See [Claude modes, setup and diagnostics](docs/claude-modes.en.md) for `--agent`, in-process/split-pane loading, version limits and isolated installation.
 
 ## Usage
 
@@ -68,6 +70,8 @@ The path is a JSON string; `/` avoids escaping Windows backslashes. Only the fir
 The relay forwards the complete message as `codex_turn({envelope: "CONV_ID: ...\n..."})`; bridge code parses the first line. Use LF or CRLF, with no initial blank line, BOM or preamble. Header whitespace is ASCII space/tab only. The nonempty body is preserved exactly, including blank lines and header-looking tokens. Optional `; REQUEST_ID: request-01` on the same first line enables safe redelivery; use a new request ID for each intended turn and the same ID only for retrying that request. Either metadata order is valid; duplicate/unknown metadata is rejected. Direct callers may still use `{conversation_id, message, working_dir?, request_id?}`; mixing modes or adding unknown arguments fails. See the [complete input/error contract](docs/runbook.en.md#deterministic-envelope-and-error-contract) for limits and error formats.
 
 ### In a Claude Code team
+
+The examples below are pseudocode. Create/spawn the teammate first, and use the schema supported by your Claude version; see the [versioned teammate procedure](docs/claude-modes.en.md#experimental-teammates).
 
 For exact diffs/code, retain the direct MCP result: `reply_artifact` provides an immutable UTF-8 resource URI, SHA-256, byte length and turn identity. Retrieve it with `resources/read` and verify the decoded bytes in code; the relay's prose is best effort. See [exact reply retrieval](docs/runbook.en.md#exact-reply-bytes-and-mcp-resources).
 
@@ -123,7 +127,7 @@ Without a restart the relay agent keeps running the old version regardless of `i
 Verify after restart:
 ```powershell
 claude mcp list   # codex_bridge must show ✓ Connected
-npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" test   # 47/47 pass
+npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" test
 ```
 
 ## Docs

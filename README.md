@@ -21,10 +21,10 @@ Jiný Claude sub-agent
 | Nástroj | Minimální verze | Poznámka |
 |---|---|---|
 | Node.js | v20 | `node --version` |
-| Claude Code CLI | aktuální | `claude --version`, musí být autentizováno |
+| Claude Code CLI | ověřeno native 2.1.126 | viz limity režimů/verzí níže; modelové tahy vyžadují přihlášení |
 | OpenAI Codex CLI | v0.153.4 | `codex --version`, musí být autentizováno |
-| PowerShell | 7 (pwsh) | pro install skript |
-| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `=1` | nastavit v prostředí |
+| PowerShell | Windows 5.1 nebo 7 | instalátor; vestavěný 5.1 + Add-Type pro backend |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `=1` | jen pro experimentální teammate; běžný subagent jej nepotřebuje |
 
 ## Instalace
 
@@ -38,11 +38,13 @@ Poté **restartuj Claude Code** (definice agentů se cachují při startu sessio
 
 Instalátor:
 1. Zkopíruje `bridge/` → `~/.claude/bridges/codex-bridge/`
-2. Spustí `npm install`
+2. Spustí `npm ci`
 3. Nahradí skutečnou cestu v `agent/codex-peer.md.template` → `~/.claude/agents/codex-peer.md`
 4. Zaregistruje MCP server na user scope (`claude mcp add --scope user codex_bridge`)
 
 `.\install.ps1` lze opakovaně spouštět po pullnutí aktualizací — je idempotentní.
+
+Běžný subagent vrací finální odpověď volajícímu; týmové odpovědi doručuje přes `SendMessage`. Instalátor ověřuje registrovaný příkaz skutečným MCP handshakem a seznamem nástrojů, bez volání Codexu. Viz [režimy Claude, nastavení a diagnostika](docs/claude-modes.md): `--agent`, načítání in-process/split-pane, limity verzí a izolovaná instalace.
 
 ## Použití
 
@@ -68,6 +70,8 @@ Cesta je JSON řetězec; `/` usnadňuje zápis Windows cest bez escapování zp�
 Relay předává celou zprávu jako `codex_turn({envelope: "CONV_ID: ...\n..."})`; první řádek parsuje kód bridge. Použij LF nebo CRLF, bez úvodního prázdného řádku, BOM či preambule. Whitespace hlavičky tvoří pouze ASCII mezery/tabulátory. Neprázdné tělo se zachová přesně, včetně prázdných řádků a textu podobného hlavičce. Volitelné `; REQUEST_ID: request-01` na stejném prvním řádku umožní bezpečné opakované doručení; pro nový zamýšlený tah použij nové request ID a stejné pouze pro opakování daného požadavku. Pořadí metadat je libovolné; opakovaná/neznámá metadata jsou chyba. Přímí volající mohou dál používat `{conversation_id, message, working_dir?, request_id?}`; smíchání režimů a neznámé argumenty se odmítnou. Limity a formáty chyb popisuje [úplný vstupní a chybový kontrakt](docs/runbook.md#deterministická-obálka-a-chybový-kontrakt).
 
 ### V Claude Code týmu
+
+Příklady níže jsou pseudokód. Nejdřív vytvoř/spusť teammate a používej schéma své verze Claude; viz [verzovaný týmový postup](docs/claude-modes.md#experimentální-členové-týmu).
 
 Pro přesné diffy/kód zachovej přímý MCP výsledek: `reply_artifact` nabízí neměnné UTF-8 resource URI, SHA-256, délku bajtů a identitu tahu. Načti jej přes `resources/read` a ověř dekódované bajty kódem; próza relaye je best effort. Viz [přesné načtení odpovědi](docs/runbook.md#přesné-bajty-odpovědi-a-mcp-resources).
 
@@ -123,7 +127,7 @@ Bez restartu bude relay agent stále používat starou verzi bez ohledu na `inst
 Ověř po restartu:
 ```powershell
 claude mcp list   # codex_bridge musí ukazovat ✓ Connected
-npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" test   # 47/47 pass
+npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" test
 ```
 
 ## Dokumentace

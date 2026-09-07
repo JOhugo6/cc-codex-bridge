@@ -12,23 +12,11 @@
 
 ---
 
-## 1. Prerekvizity a jak je ověřit
+## 1. Prerekvizity a kontrola připojení
 
-Spusť každou kontrolu před prvním použitím. Všechny cesty jsou absolutní (user-scope config Windows neexpanduje `~`/`$HOME`).
+Nejdřív čti [režimy Claude, instalaci a diagnostiku](claude-modes.md). Rozlišují běžného subagenta, hlavní `--agent`, in-process i split-pane teammate a uvádějí testované verze. Agent Teams je nutný jen pro teammate. Potřebuješ nativní Node 20+, nativní Claude CLI, přihlášený Codex CLI a Windows PowerShell 5.1 s Add-Type; install.ps1 funguje i pod PowerShell 7.
 
-| # | Prerekvizita | Příkaz (PowerShell) | Očekáváno |
-|---|---|---|---|
-| 1 | Agent Teams zapnuto | `$env:CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | vypíše `1` |
-| 2 | Codex CLI nainstalováno | `(Get-Command codex).Source` | cesta končící na `codex.cmd` (např. `C:\Users\ai\AppData\Roaming\npm\codex.cmd`) |
-| 3 | Codex autentizován | `codex login status` (nebo spusť triviální `codex` turn) | hlásí přihlášený účet, bez auth promptu |
-| 4 | Node přítomen (runtime bridge) | `node --version` | vypíše verzi (bridge ho potřebuje) |
-| 5 | Bridge zaregistrován | `claude mcp list` | řádek `codex_bridge: ... - ✓ Connected` |
-| 6 | Relay agent přítomen | `Test-Path C:\Users\ai\.claude\agents\codex-peer.md` | `True` |
-
-Poznámky:
-- **#1** musí být nastaveno v prostředí, které spouští Claude Code, ne jen v shellu otevřeném poté. Pokud nic nevypíše, vícekolová `SendMessage` konverzace tiše degraduje na fire-once a akceptační test nemůže projít.
-- **#5** — registraci provádí `install.ps1` (spusť dle instrukcí). Provede ekvivalent: `claude mcp add --transport stdio --scope user codex_bridge -- cmd /c node "C:\Users\ai\.claude\bridges\codex-bridge\index.js"`. Název serveru **musí** být `codex_bridge` (podtržítko), jinak se nástroj nesurfacuje jako `mcp__codex_bridge__codex_turn` a allow-list relay agenta nebude souhlasit. Pokud `claude mcp list` ukazuje server ale **ne** `✓ Connected`, relay selže při prvním volání — oprav bridge dříve, než budeš pokračovat (viz Troubleshooting).
-- Po registraci nebo úpravě agent souboru **restartuj Claude Code session**, aby byl nový MCP server a definice agenta načtena.
+Příkaz `node "$env:USERPROFILE/.claude/bridges/codex-bridge/doctor.js"` skutečně inicializuje registrovaný MCP příkaz a ověří nástroj `codex_turn`; pro izolovanou instalaci použij popsanou alternativní konfiguraci. Omezená kontrola nevytváří modelový tah, neověřuje login Codexu ani načtení nástroje v konkrétní session. Po instalaci restartuj Claude, ověř dostupnost nástroje v session a spusť relay požadavek.
 
 ### Uložení identity a přechod ze starého formátu
 
@@ -116,7 +104,7 @@ U staršího stavu bez cwd backend přečte existující vlákno přes `thread/r
 ## 2. Použití `codex-peer` v týmu
 
 ### Co to je
-`codex-peer` je adresovatelný, reaktivní člen. Jiné sub-agenty s ním mluví přes `SendMessage`; přeposílá každou zprávu do Codexu přes bridge a vrací odpověď Codexu verbatim. Nikdy nereasonuje, nikdy neupravuje, nikdy neiniciuje.
+`codex-peer` je adresovatelný, reaktivní člen. Jiné sub-agenty s ním mluví přes `SendMessage`; přeposílá každý požadavek do Codexu přes bridge a vrací odpověď Codexu verbatim. Nikdy nereasonuje, nikdy neupravuje, nikdy neiniciuje.
 
 ### Konvence `CONV_ID:` (POVINNÉ — ty dodáváš klíč kontinuity)
 On-disk klíč kontinuity (`conversation_id`) musí být **byte-identický** po celou konverzaci, včetně po re-instanciaci relay agenta s prázdným kontextem. Relay NEodvozuje ani nehaduje tento klíč — **adresující agent ho dodá explicitně** jako první řádek každé zprávy:
@@ -271,7 +259,7 @@ Podstatný požadavek: po tomto kroku relay agent NESMÍ mít kola 1–2 ve své
 |---|---|---|
 | **Tichá amnézie** — Codex se chová jako cizinec na follow-up; recall tokenu v kole 3 selže přestože odpovědi vypadají zdravě | §2 / §4.1.4: `thread_id` byl držen v LLM kontextu (nebo relay změnil `conversation_id`) a byl ztracen při compaction; nebo bridge tiše zahájil NOVOU session místo errorování | Potvrď, že bridge persistuje `thread_id` do `~/.claude/state/codex-bridge/v2@<sha256>.json` a znovupoužívá ho; potvrď, že relay předává konstantní `conversation_id` (zkontroluj `transcript.jsonl` — id musí být identické v každém tahu). Bridge musí HARD-ERROROVAT, když nemůže obnovit session, nikdy nespustí novou. |
 | **Stdout pollution** — relay/tool call selže s JSON parse / protocol errors, zkomolenými MCP odpověďmi | §6: CLI bannery / `Write-Host` / non-protocol chatter unikl na **stdout**; stdio MCP vyžaduje, aby stdout nesl POUZE newline-delimited JSON | Veškerý CLI chatter musí jít na **stderr**; emituj UTF-8 **bez BOM**, LF line endings. Oprava na straně bridge. Ověř spuštěním bridge příkazu ručně a potvrď, že stdout je čisté JSON-RPC. |
-| **Windows shim launch failure** — bridge nemůže spustit Codex; hang nebo "process exited" bez odpovědi | §6: `codex` je `.cmd` shim; bare `CreateProcess` na něm selže nebo zatuče | Spouštěj přes `cmd /c codex …` nebo absolutní cestu k `.cmd` (např. `C:\Users\<user>\AppData\Roaming\npm\codex.cmd`). Oprava na straně bridge. |
+| **Windows native launch failure** | Chybí nativní executable nebo Job Object helper | Přeinstaluj Codex včetně platform package, ověř Windows PowerShell 5.1/Add-Type a oba nainstalované helpery. Bridge hledá nativní codex.exe, nepoužívá cmd wrapper. |
 | **Cold-start race** — první tah vrátí prázdno / timeout / "no session yet", pozdější tahy fungují | §6/§4.1.4: první volání závodí se spawnem `codex app-server`; příliš rychlý bridge vrátí dříve než dostane první reálnou odpověď | Bridge musí **blokovat až do první reálné odpovědi** a hard-errorovat při timeout — nikdy nevrátit fake / fresh-session placeholder. Oprava na straně bridge. |
 | **Cross-project / cross-thread bleed** — odpovědi z jiného týmu/konverzace se prolínají | §4.2/§8.3: dvě konverzace kolidovaly na stejném `conversation_id`, nebo sdílejí jeden `codex app-server` proces | Ujisti se, že operátor-dodaný `CONV_ID:` je unikátní per tým/konverzace. Ověř `transcript.jsonl` na proložené tahy z nesouvisejících témat. |
 | **Relay editorizuje** — odpověď je shrnutá/přeformátovaná, kód/diff zmrzačen | §2: relay LLM změnil výstup | Načti `reply_artifact.uri` přímo přes MCP `resources/read` a ověř SHA-256/délku v kódu. Resource zachovává bajty odpovědi bridge. |
