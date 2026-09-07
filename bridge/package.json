@@ -10,7 +10,7 @@
   },
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/bridge.test.js test/codex-backend.test.js test/mcp-server.test.js test/lock.test.js",
+    "test": "node --test test/bridge.test.js test/codex-backend.test.js test/mcp-server.test.js test/lock.test.js test/identity.test.js",
     "smoke": "node --test test/live-smoke.test.js"
   },
   "engines": {

@@ -13,7 +13,7 @@ Other Claude sub-agent
             └─ codex_turn MCP tool
                  └─ codex-bridge (deterministic Node server)
                       └─ codex mcp-server (real Codex CLI)
-                           └─ ~/.claude/state/codex-bridge/my-conv.json  ← thread_id on disk
+                           └─ ~/.claude/state/codex-bridge/v2@<sha256>.json  ← thread_id on disk
 ```
 
 ## Prerequisites
@@ -92,7 +92,7 @@ npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" run smoke
 
 ## Key design decisions
 
-- **Thread continuity on disk, not in the LLM.** The relay agent holds no state. The bridge persists `thread_id` to `~/.claude/state/codex-bridge/<conv_id>.json` so it survives agent re-instantiation and context compaction.
+- **Thread continuity on disk, not in the LLM.** The relay agent holds no state. The bridge persists `thread_id` to `~/.claude/state/codex-bridge/v2@<sha256>.json` so it survives agent re-instantiation and context compaction.
 - **Hard-error on lost session.** A failed resume throws loudly — never silently starts a fresh session (which would be invisible amnesia).
 - **`model: sonnet` for the relay.** Haiku was unreliable about calling the tool vs. improvising its own answer. Sonnet follows the tool-call instruction reliably.
 - **`CONV_ID:` is operator-supplied.** The relay never derives the key — an LLM-guessed key would be non-deterministic and break cross-spawn continuity.

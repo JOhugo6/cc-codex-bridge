@@ -162,6 +162,8 @@ class CodexBridge {
       }
 
       const newState = {
+        ...(prior && prior.legacy_migration ? { legacy_migration: prior.legacy_migration } : {}),
+        conversation_id: conversationId,
         thread_id: threadId,
         turn: turnNumber,
         provider: this.provider,

@@ -41,7 +41,7 @@ Honestly: this gives you an **addressable member, not a symmetric peer**. The re
                                    └──────────────┘                   └──────┬───────────┘
                                                                               │ persists
                                                                               ▼
-                                                            ~/.claude/state/codex-bridge/<conv>.json
+                                                            ~/.claude/state/codex-bridge/v2@<sha256>.json
                                                               { threadId, turns, createdAt }   + transcript.jsonl
 ```
 
@@ -69,11 +69,12 @@ Behavior (deterministic, no LLM):
 
 ```
 ~/.claude/state/codex-bridge/
-  <conversation_id>.json               # { thread_id, turn, created_at }
-  <conversation_id>.transcript.jsonl   # 1 line/turn: {ts, direction, message, thread_id, tokens?}
-  <conversation_id>.lock               # file lock
+  v2@<sha256>.json               # { conversation_id, thread_id, turn, created_at }
+  v2@<sha256>.transcript.jsonl   # 1 line/turn: {ts, direction, message, thread_id, tokens?}
+  v2@<sha256>.lock               # file lock
 ```
 
+- `sha256` hashes the exact UTF-8 `conversation_id` without case conversion. The original ID is checked in state; old files require explicit migration according to the [runbook](runbook.en.md#identity-storage-and-upgrading-the-legacy-layout).
 - Keyed by `conversation_id` (= peer + run/conversation), so threads **do not bleed** across projects/teams.
 - Transcript = visibility + crash recovery + audit (catches a relay that silently edited) + re-seed on thread loss.
 

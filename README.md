@@ -13,7 +13,7 @@ Jiný Claude sub-agent
             └─ codex_turn MCP nástroj
                  └─ codex-bridge (deterministický Node server)
                       └─ codex mcp-server (nativní Codex CLI)
-                           └─ ~/.claude/state/codex-bridge/my-conv.json  ← thread_id na disku
+                           └─ ~/.claude/state/codex-bridge/v2@<sha256>.json  ← thread_id na disku
 ```
 
 ## Prerekvizity
@@ -92,7 +92,7 @@ npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" run smoke
 
 ## Klíčová designová rozhodnutí
 
-- **Kontinuita vlákna na disku, ne v LLM.** Relay agent nedrží žádný stav. Bridge persistuje `thread_id` do `~/.claude/state/codex-bridge/<conv_id>.json`, takže přežije re-instanciaci agenta a context compaction.
+- **Kontinuita vlákna na disku, ne v LLM.** Relay agent nedrží žádný stav. Bridge persistuje `thread_id` do `~/.claude/state/codex-bridge/v2@<sha256>.json`, takže přežije re-instanciaci agenta a context compaction.
 - **Hard-error při ztrátě session.** Selhání obnovy vlákna vyhodí hlasitou chybu — nikdy tiše nezahájí novou session (to by byla neviditelná amnézie).
 - **`model: sonnet` pro relay.** Haiku byl nespolehlivý ohledně volání nástroje vs. improvizace vlastní odpovědi. Sonnet spolehlivě následuje instrukce pro tool call.
 - **`CONV_ID:` dodává operátor.** Relay klíč nikdy neodvozuje — LLM-hádaný klíč by byl nedeterministický a zlomil by cross-spawn kontinuitu.

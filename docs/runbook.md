@@ -30,6 +30,25 @@ Poznámky:
 - **#5** — registraci provádí `install.ps1` (spusť dle instrukcí). Provede ekvivalent: `claude mcp add --transport stdio --scope user codex_bridge -- cmd /c node "C:\Users\ai\.claude\bridges\codex-bridge\index.js"`. Název serveru **musí** být `codex_bridge` (podtržítko), jinak se nástroj nesurfacuje jako `mcp__codex_bridge__codex_turn` a allow-list relay agenta nebude souhlasit. Pokud `claude mcp list` ukazuje server ale **ne** `✓ Connected`, relay selže při prvním volání — oprav bridge dříve, než budeš pokračovat (viz Troubleshooting).
 - Po registraci nebo úpravě agent souboru **restartuj Claude Code session**, aby byl nový MCP server a definice agenta načtena.
 
+### Uložení identity a přechod ze starého formátu
+
+Stav, transcript a zámek používají společný název `v2@<sha256 přesného conversation_id>` s příponami `.json`, `.transcript.jsonl` a `.lock`. Hash se počítá z UTF-8 bez změny velikosti písmen; `Review-A` a `review-a` jsou dvě samostatné konverzace i na Windows. Stav i nové řádky transcriptu obsahují původní `conversation_id`; při neshodě stavu bridge vrátí `STATE_IDENTITY_MISMATCH` bez volání Codexu. Pro vypsání cest spusť v adresáři bridge:
+
+```powershell
+node -e 'const p=require("./lib/paths"); for (const f of [p.stateFile,p.transcriptFile,p.lockDir]) console.log(f(process.argv[1]))' 'Review-A'
+```
+
+Starší soubory `<conversation_id>.json` se nemigrují automaticky. Dokud existují bez migračního záznamu, volání vrátí `LEGACY_MIGRATION_REQUIRED`; rozdílná velikost písmen nebo jiné nejednoznačné přiřazení vyvolá `LEGACY_IDENTITY_CONFLICT`. Bridge nezačne nové vlákno.
+
+1. Zastav staré instance bridge a zazálohuj celý adresář stavu. Pro vlastní umístění nastav stejné `CODEX_BRIDGE_STATE_DIR` jako u bridge.
+2. Ověř přesnou velikost písmen ID podle původního názvu souboru a orchestrátoru. Původní formát neukládal ID a na Windows mohl sloučit požadavky s různou velikostí písmen. Migrace je výslovné přiřazení zachovaného vlákna jednomu přesnému ID; sloučenou historii neumí rozdělit.
+3. Z adresáře nainstalovaného bridge spusť `node migrate-state.js 'Review-A'`. Příkaz nevolá Codex, drží nový i původní zámek a vypíše JSON s cestou výsledného stavu.
+4. Pokračuj se stejným přesným ID. Bridge obnoví původní `thread_id` a naváže na číslo tahu.
+
+Migrace kopíruje transcript beze změny bajtů. Původní transcript zůstává zachován a původní stav je uložen v poli `original_state` uvnitř migračního záznamu ve starém souboru. Tento záznam zachovej: starému bridge zabrání pokračovat nad zastaralou kopií a novému umožní kontrolovat dokončenou migraci. Po migraci používej jen novou verzi bridge.
+
+Opakování dokončené migrace nic nepřepíše. Přerušenou migraci lze zopakovat, pokud stále souhlasí původní a již zapsané cílové údaje. Při konfliktním cílovém stavu/transcriptu, chybějícím stavu nebo změně archivu příkaz skončí chybou a ponechá důkazy pro obnovu. Neodstraňuj stav ani záznam kvůli obejití chyby; nejprve podle zálohy a transcriptu ověř správné vlákno. Nedotčené konverzace se nemigrují.
+
 ---
 
 ## 2. Použití `codex-peer` v týmu
@@ -115,7 +134,7 @@ Pokud žádná z těchto pojistek není zapojená pro daný tým, nespouštěj o
 > Zapamatuj si toto pro náš pozdější rozhovor: můj akceptační token je
 > `ACCEPT-7F3Q-MARMOT`. Jen potvrď, že sis to poznamenal."
 
-Potvrď, že odpověď přišla verbatim a token potvrzuje. Potvrď, že relay zavolal `codex_turn` s `conversation_id="accept-test--codex-continuity-01"` (viditelné v args volání a v bridge transcriptu na `C:\Users\ai\.claude\state\codex-bridge\accept-test--codex-continuity-01.transcript.jsonl`).
+Potvrď, že odpověď přišla verbatim a token potvrzuje. Potvrď, že relay zavolal `codex_turn` s `conversation_id="accept-test--codex-continuity-01"` (viditelné v args volání a v bridge transcriptu na `C:\Users\ai\.claude\state\codex-bridge\v2@<sha256>.transcript.jsonl`).
 
 **Kolo 2 — normální, nesouvisející tah.** Pošli `codex-peer` (STEJNÝ `CONV_ID:`):
 > "CONV_ID: accept-test--codex-continuity-01
@@ -156,7 +175,7 @@ Podstatný požadavek: po tomto kroku relay agent NESMÍ mít kola 1–2 ve své
 
 | Symptom | Příčina (dle design doc) | Oprava |
 |---|---|---|
-| **Tichá amnézie** — Codex se chová jako cizinec na follow-up; recall tokenu v kole 3 selže přestože odpovědi vypadají zdravě | §2 / §4.1.4: `thread_id` byl držen v LLM kontextu (nebo relay změnil `conversation_id`) a byl ztracen při compaction; nebo bridge tiše zahájil NOVOU session místo errorování | Potvrď, že bridge persistuje `thread_id` do `~/.claude/state/codex-bridge/<conv>.json` a znovupoužívá ho; potvrď, že relay předává konstantní `conversation_id` (zkontroluj `transcript.jsonl` — id musí být identické v každém tahu). Bridge musí HARD-ERROROVAT, když nemůže obnovit session, nikdy nespustí novou. |
+| **Tichá amnézie** — Codex se chová jako cizinec na follow-up; recall tokenu v kole 3 selže přestože odpovědi vypadají zdravě | §2 / §4.1.4: `thread_id` byl držen v LLM kontextu (nebo relay změnil `conversation_id`) a byl ztracen při compaction; nebo bridge tiše zahájil NOVOU session místo errorování | Potvrď, že bridge persistuje `thread_id` do `~/.claude/state/codex-bridge/v2@<sha256>.json` a znovupoužívá ho; potvrď, že relay předává konstantní `conversation_id` (zkontroluj `transcript.jsonl` — id musí být identické v každém tahu). Bridge musí HARD-ERROROVAT, když nemůže obnovit session, nikdy nespustí novou. |
 | **Stdout pollution** — relay/tool call selže s JSON parse / protocol errors, zkomolenými MCP odpověďmi | §6: CLI bannery / `Write-Host` / non-protocol chatter unikl na **stdout**; stdio MCP vyžaduje, aby stdout nesl POUZE newline-delimited JSON | Veškerý CLI chatter musí jít na **stderr**; emituj UTF-8 **bez BOM**, LF line endings. Oprava na straně bridge. Ověř spuštěním bridge příkazu ručně a potvrď, že stdout je čisté JSON-RPC. |
 | **Windows shim launch failure** — bridge nemůže spustit Codex; hang nebo "process exited" bez odpovědi | §6: `codex` je `.cmd` shim; bare `CreateProcess` na něm selže nebo zatuče | Spouštěj přes `cmd /c codex …` nebo absolutní cestu k `.cmd` (např. `C:\Users\<user>\AppData\Roaming\npm\codex.cmd`). Oprava na straně bridge. |
 | **Cold-start race** — první tah vrátí prázdno / timeout / "no session yet", pozdější tahy fungují | §6/§4.1.4: první volání závodí se spawnem `codex mcp-server`; příliš rychlý bridge vrátí dříve než dostane první reálnou odpověď | Bridge musí **blokovat až do první reálné odpovědi** a hard-errorovat při timeout — nikdy nevrátit fake / fresh-session placeholder. Oprava na straně bridge. |

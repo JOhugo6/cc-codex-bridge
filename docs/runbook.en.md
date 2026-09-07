@@ -30,6 +30,25 @@ Notes:
 - **#5** — registration is done by `install.ps1` (run it per the project instructions). It performs the equivalent of: `claude mcp add --transport stdio --scope user codex_bridge -- cmd /c node "C:\Users\ai\.claude\bridges\codex-bridge\index.js"`. The server name **must** be `codex_bridge` (underscore), otherwise the tool will not surface as `mcp__codex_bridge__codex_turn` and the relay agent's allowlist will not match. If `claude mcp list` shows the server but **not** `✓ Connected`, the relay will fail at first call — fix the bridge before proceeding (see Troubleshooting).
 - After registering or editing the agent file, **restart the Claude Code session** so the new MCP server and agent definition are picked up.
 
+### Identity storage and upgrading the legacy layout
+
+State, transcript and lock filenames share `v2@<sha256 of exact conversation_id>` with `.json`, `.transcript.jsonl` and `.lock` suffixes. The hash uses UTF-8 without case conversion; `Review-A` and `review-a` are independent conversations even on Windows. State and new transcript entries retain the original `conversation_id`; a state mismatch returns `STATE_IDENTITY_MISMATCH` before calling Codex. To print the paths, run from the bridge directory:
+
+```powershell
+node -e 'const p=require("./lib/paths"); for (const f of [p.stateFile,p.transcriptFile,p.lockDir]) console.log(f(process.argv[1]))' 'Review-A'
+```
+
+Legacy `<conversation_id>.json` files are never migrated implicitly. Calls encountering unmigrated files return `LEGACY_MIGRATION_REQUIRED`; different casing or ambiguous ownership returns `LEGACY_IDENTITY_CONFLICT`. The bridge does not start a fresh thread.
+
+1. Stop old bridge instances and back up the entire state directory. For a custom location, set the same `CODEX_BRIDGE_STATE_DIR` used by the bridge.
+2. Verify the exact ID casing against the original filename and orchestrator. The old format did not store the ID and could merge differently cased requests on Windows. Migration explicitly assigns the preserved thread to one exact ID; it cannot split merged history.
+3. From the installed bridge directory, run `node migrate-state.js 'Review-A'`. The command does not call Codex, holds both the new and legacy locks, and prints JSON containing the resulting state path.
+4. Continue with that exact ID. The bridge resumes the original `thread_id` and advances its turn counter.
+
+Migration copies the transcript byte for byte. The legacy transcript remains intact; the original state is retained in `original_state` within a migration marker at the old filename. Keep this marker: it prevents an old bridge from resuming a stale copy and lets the new bridge verify completion. Use only the updated bridge after migration.
+
+Repeating a completed migration changes nothing. An interrupted migration can be retried while the original and already written destination data still agree. Conflicting destination state/transcript, missing state or changed archives cause an error and preserve the evidence for recovery. Do not remove state or markers to bypass errors; first establish the correct thread using backups and transcripts. Unrelated conversations are not migrated.
+
 ---
 
 ## 2. Using `codex-peer` in a team
@@ -115,7 +134,7 @@ If none of these are wired up for a given team, do not run an open-ended Codex e
 > Remember this for later in our conversation: my acceptance token is
 > `ACCEPT-7F3Q-MARMOT`. Just acknowledge that you've noted it."
 
-Confirm the reply comes back verbatim and acknowledges the token. Confirm the relay called `codex_turn` with `conversation_id="accept-test--codex-continuity-01"` (visible in the call args, and in the bridge transcript at `C:\Users\ai\.claude\state\codex-bridge\accept-test--codex-continuity-01.transcript.jsonl`).
+Confirm the reply comes back verbatim and acknowledges the token. Confirm the relay called `codex_turn` with `conversation_id="accept-test--codex-continuity-01"` (visible in the call args, and in the bridge transcript at `C:\Users\ai\.claude\state\codex-bridge\v2@<sha256>.transcript.jsonl`).
 
 **Round 2 — a normal, unrelated turn.** Send to `codex-peer` (SAME `CONV_ID:`):
 > "CONV_ID: accept-test--codex-continuity-01
@@ -156,7 +175,7 @@ The essential requirement: after this step the relay agent must NOT have rounds 
 
 | Symptom | Design-doc cause | Fix |
 |---|---|---|
-| **Silent amnesia** — Codex acts like a stranger on a follow-up; round-3 token recall fails even though replies look healthy | §2 / §4.1.4: `thread_id` was held in LLM context (or relay changed `conversation_id`) and was lost on compaction; or the bridge silently started a NEW session instead of erroring | Confirm the bridge persists `thread_id` to `~/.claude/state/codex-bridge/<conv>.json` and reuses it; confirm the relay passes a constant `conversation_id` (check `transcript.jsonl` — the id must be identical every turn). Bridge must HARD-ERROR when it cannot restore a session, never open a fresh one. |
+| **Silent amnesia** — Codex acts like a stranger on a follow-up; round-3 token recall fails even though replies look healthy | §2 / §4.1.4: `thread_id` was held in LLM context (or relay changed `conversation_id`) and was lost on compaction; or the bridge silently started a NEW session instead of erroring | Confirm the bridge persists `thread_id` to `~/.claude/state/codex-bridge/v2@<sha256>.json` and reuses it; confirm the relay passes a constant `conversation_id` (check `transcript.jsonl` — the id must be identical every turn). Bridge must HARD-ERROR when it cannot restore a session, never open a fresh one. |
 | **Stdout pollution** — relay/tool call fails with JSON parse / protocol errors, garbled MCP responses | §6: CLI banners / `Write-Host` / non-protocol chatter leaked onto **stdout**; stdio MCP requires stdout to carry ONLY newline-delimited JSON | All CLI chatter must go to **stderr**; emit UTF-8 **without BOM**, LF line endings. Bridge-side fix. Verify by running the bridge command manually and confirming stdout is pure JSON-RPC. |
 | **Windows shim launch failure** — bridge can't start Codex; hang or "process exited" with no reply | §6: `codex` is a `.cmd` shim; bare `CreateProcess` on it fails or hangs | Launch via `cmd /c codex …` or the absolute path to `codex.cmd` (e.g. `C:\Users\ai\AppData\Roaming\npm\codex.cmd`). Bridge-side fix. |
 | **Cold-start race** — first turn returns empty / times out / "no session yet", later turns work | §6/§4.1.4: the first call races the spawn of `codex mcp-server` (and its own downstream MCP servers); a too-eager bridge returns before the first real reply | Bridge must **block until the first real response** and hard-error on timeout — never return a fake / fresh-session placeholder. Bridge-side fix. |

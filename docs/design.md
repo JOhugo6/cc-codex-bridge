@@ -41,7 +41,7 @@ A upřímně: tohle dá **adresovatelného člena, ne symetrického peera**. Rea
                                    └──────────────┘                   └──────┬───────────┘
                                                                               │ persistuje
                                                                               ▼
-                                                            ~/.claude/state/codex-bridge/<conv>.json
+                                                            ~/.claude/state/codex-bridge/v2@<sha256>.json
                                                               { threadId, turns, createdAt }   + transcript.jsonl
 ```
 
@@ -69,11 +69,12 @@ Chování (deterministické, žádný LLM):
 
 ```
 ~/.claude/state/codex-bridge/
-  <conversation_id>.json               # { thread_id, turn, created_at }
-  <conversation_id>.transcript.jsonl   # 1 řádek/tah: {ts, direction, message, thread_id, tokens?}
-  <conversation_id>.lock               # file lock
+  v2@<sha256>.json               # { conversation_id, thread_id, turn, created_at }
+  v2@<sha256>.transcript.jsonl   # 1 řádek/tah: {ts, direction, message, thread_id, tokens?}
+  v2@<sha256>.lock               # file lock
 ```
 
+- `sha256` je hash přesného UTF-8 `conversation_id` bez změny velikosti písmen. Původní ID se kontroluje ve stavu; staré soubory vyžadují explicitní migraci podle [provozní příručky](runbook.md#uložení-identity-a-přechod-ze-starého-formátu).
 - Klíčováno `conversation_id` (= `peer` + běh/konverzace), aby se vlákna **neprolnula** mezi projekty/týmy.
 - Transcript = viditelnost + crash recovery + audit (chytíš relay, který tiše editoval) + re-seed při ztrátě vlákna.
 
