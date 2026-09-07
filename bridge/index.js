@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 'use strict';
 // codex-bridge — deterministic stdio MCP server (design §4.1).
-// Exposes exactly ONE tool: codex_turn(conversation_id, message) -> { reply, thread_id, turn }.
+// Exposes one codex_turn tool, accepting either a raw relay envelope or structured arguments.
 //
 // stdout carries ONLY MCP protocol bytes (the SDK's StdioServerTransport writes raw newline-
 // delimited JSON in UTF-8, no BOM). ALL diagnostics go to stderr. Do NOT console.log to stdout.
 
-const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
+const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
+const { ListToolsRequestSchema, CallToolRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
 const { z } = require('zod');
 
 const { CodexBridge } = require('./lib/bridge');
 const { CodexBackend } = require('./lib/codex-backend');
+const { parseToolInput, inputJsonSchema, errorResult } = require('./lib/turn-input');
 
 function elog(...args) {
   process.stderr.write('[codex-bridge] ' + args.map(String).join(' ') + '\n');
@@ -62,65 +64,50 @@ async function main() {
   const backend = makeBackend();
   const bridge = new CodexBridge(backend, { provider: 'codex' });
 
-  const server = new McpServer(
+  const server = new Server(
     { name: 'codex-bridge', version: '1.0.0' },
     {
       capabilities: { tools: {} },
       instructions:
-        'Deterministic bridge to OpenAI Codex CLI. Call codex_turn with a STABLE conversation_id ' +
-        'for the whole exchange; the bridge owns Codex thread continuity on disk. Return the ' +
-        'reply field verbatim.',
+        'Deterministic bridge to OpenAI Codex CLI. Relays call codex_turn with only envelope: ' +
+        'the complete incoming message unchanged. Direct callers may instead supply conversation_id, ' +
+        'message and optional working_dir/request_id. Never mix these modes. The bridge owns ' +
+        'thread continuity on disk; return reply verbatim or the single-line tool error unchanged.',
     }
   );
 
-  server.registerTool(
-    'codex_turn',
-    {
+  const outputSchema = z.object({
+    reply: z.string().describe('Codex reply text, verbatim.'),
+    thread_id: z.string().describe('Persisted Codex thread id for this conversation.'),
+    turn: z.number().int().describe('1-based turn number within this conversation.'),
+  });
+  // The low-level SDK handlers let validation errors use the same single-line format as
+  // backend errors, and advertise both strict input alternatives without SDK union coercion.
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [{
+      name: 'codex_turn',
       title: 'Codex Turn',
       description:
         'Send one message to OpenAI Codex as an addressable team member and get its reply. ' +
-        'Use a STABLE conversation_id for the entire multi-turn exchange — the bridge persists ' +
-        'the Codex thread_id on disk and resumes it. On a lost/unresumable session it returns a ' +
-        'loud error rather than silently starting fresh.',
-      inputSchema: {
-        conversation_id: z
-          .string()
-          .min(1)
-          .max(200)
-          .regex(/^[A-Za-z0-9._-]+$/)
-          .describe(
-            'Stable per-conversation key (letters, digits, ., _, -). Keep constant for the whole exchange.'
-          ),
-        // MAJOR-10: cap message size to prevent memory/disk exhaustion.
-        message: z
-          .string()
-          .min(1)
-          .max(100000)
-          .describe('The message to send to Codex this turn.'),
-        request_id: z
-          .string().min(1).max(200).regex(/^[A-Za-z0-9._-]+$/).optional()
-          .describe('Optional unique ID for this request within the conversation. Reuse with identical input to retrieve its completed result without another Codex call.'),
-        // A real directory is canonicalized and pinned on the first turn.
-        working_dir: z
-          .string()
-          .min(1)
-          .max(500)
-          .optional()
-          .describe(
-            'Existing project directory for Codex, normalized and pinned on the first turn. ' +
-              'Defaults to bridge launch cwd; relative paths resolve there. Later turns inherit the pinned ' +
-              'directory; an explicitly different directory is rejected. Prefer an absolute project path.'
-          ),
-      },
-      outputSchema: {
-        reply: z.string().describe('Codex reply text, verbatim.'),
-        thread_id: z.string().describe('Persisted Codex thread id for this conversation.'),
-        turn: z.number().int().describe('1-based turn number within this conversation.'),
-      },
-    },
-    async ({ conversation_id, message, working_dir, request_id }) => {
+        'Pass either {envelope} with the complete raw relay message, or direct structured ' +
+        '{conversation_id, message, working_dir?, request_id?}; no mixed or unknown arguments. ' +
+        'Use the same exact conversation ID throughout the exchange. The bridge persists ' +
+        'thread continuity and fails loudly when a session cannot be resumed.',
+      inputSchema: inputJsonSchema,
+      outputSchema: z.toJSONSchema(outputSchema),
+    }],
+  }));
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
+        if (request.params.name !== 'codex_turn') {
+          throw Object.assign(new Error('Unknown tool; this server exposes only codex_turn.'), { code: 'UNKNOWN_TOOL' });
+        }
+        if (request.params.task) {
+          throw Object.assign(new Error('codex_turn does not support task-augmented calls.'), { code: 'INVALID_ARGUMENTS' });
+        }
+        const { conversation_id, message, working_dir, request_id } = parseToolInput(request.params.arguments);
         const out = await bridge.turn(conversation_id, message, { working_dir, request_id });
+        outputSchema.parse(out);
         return {
           // structuredContent is the fidelity-bearing channel (design §2: fidelity from tool
           // result, not relay prose). Also mirror to a text block for clients that ignore it.
@@ -129,22 +116,9 @@ async function main() {
         };
       } catch (err) {
         elog('codex_turn FAILED:', (err && err.code) || '', (err && err.message) || err);
-        // LOUD MCP error — surfaces to the calling agent as a tool error, never a silent success.
-        return {
-          isError: true,
-          content: [
-            {
-              type: 'text',
-              text:
-                `codex_turn failed for conversation '${conversation_id}'` +
-                (err && err.code ? ` [${err.code}]` : '') +
-                `: ${err && err.message ? err.message : String(err)}`,
-            },
-          ],
-        };
+        return errorResult(err);
       }
-    }
-  );
+  });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

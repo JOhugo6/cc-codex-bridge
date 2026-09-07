@@ -65,12 +65,13 @@ Review the source files in this project.
 
 The path is a JSON string; `/` avoids escaping Windows backslashes. Only the first line contains metadata; the body is passed unchanged. The bridge validates the directory and stores its canonical path with the thread. Later messages may omit it; a different directory is rejected. Without an explicit first-turn path, the default is the bridge process's launch directory, captured when the bridge starts. Relative paths resolve against that same directory, so prefer absolute project paths. Old threads without a saved directory are blocked pending verification; see [directory diagnostics](docs/runbook.en.md#working-directory-and-legacy-threads).
 
+The relay forwards the complete message as `codex_turn({envelope: "CONV_ID: ...\n..."})`; bridge code parses the first line. Use LF or CRLF, with no initial blank line, BOM or preamble. Header whitespace is ASCII space/tab only. The nonempty body is preserved exactly, including blank lines and header-looking tokens. Optional `; REQUEST_ID: request-01` on the same first line enables safe redelivery; use a new request ID for each intended turn and the same ID only for retrying that request. Either metadata order is valid; duplicate/unknown metadata is rejected. Direct callers may still use `{conversation_id, message, working_dir?, request_id?}`; mixing modes or adding unknown arguments fails. See the [complete input/error contract](docs/runbook.en.md#deterministic-envelope-and-error-contract) for limits and error formats.
+
 ### In a Claude Code team
 
 ```python
 # Example: orchestrator sends a message to codex-peer
-SendMessage(to="codex-peer", message="""
-CONV_ID: sprint42--arch-review
+SendMessage(to="codex-peer", message="""CONV_ID: sprint42--arch-review
 We're designing a new caching layer. What are the trade-offs between
 write-through and write-back strategies for our use case?
 """)
@@ -79,8 +80,7 @@ write-through and write-back strategies for our use case?
 Then later, in a fresh spawn:
 
 ```python
-SendMessage(to="codex-peer", message="""
-CONV_ID: sprint42--arch-review
+SendMessage(to="codex-peer", message="""CONV_ID: sprint42--arch-review
 Given the trade-offs you described, which would you recommend for a
 read-heavy workload with occasional burst writes?
 """)

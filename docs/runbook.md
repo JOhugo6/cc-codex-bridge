@@ -4,7 +4,7 @@
 
 > Doplněk k design doku `design.md`. Tato příručka pokrývá provoz **membership vrstvy**: relay agenta `codex-peer` (`~/.claude/agents/codex-peer.md`) a deterministického MCP mostu (`codex-bridge`).
 >
-> **Tool kontrakt (pevný):** bridge je zaregistrovaný jako MCP server `codex_bridge` a vystavuje jeden nástroj, surfacující k agentům jako **`mcp__codex_bridge__codex_turn`**, se signaturou `codex_turn(conversation_id, message) -> { reply, thread_id, turn }`.
+> **Tool kontrakt (pevný):** bridge je zaregistrovaný jako MCP server `codex_bridge` a vystavuje jeden nástroj, surfacující k agentům jako **`mcp__codex_bridge__codex_turn`**, se signaturou `codex_turn({envelope})` / `codex_turn({conversation_id, message, working_dir?, request_id?}) -> { reply, thread_id, turn }`.
 >
 > **Architektura jednou větou:** jiný Claude sub-agent → `SendMessage` → `codex-peer` (tenká slupka) → MCP volání `codex_turn` → `codex-bridge` (deterministický, drží `thread_id` na disku) → Codex CLI → odpověď zpět, vrácená verbatim.
 >
@@ -53,7 +53,7 @@ Opakování dokončené migrace nic nepřepíše. Přerušenou migraci lze zopak
 
 ### Opakované doručení a obnova operace
 
-Přímý volající `codex_turn` může předat volitelné `request_id` (1–200 písmen, číslic, `.`, `_`, `-`). Pro každý zamýšlený tah zvol nové ID; stejné použij pouze při opakovaném doručení téhož požadavku. ID rozlišuje velikost písmen a platí v rámci přesného `conversation_id`. Stejné ID s jinou zprávou, výsledným kanonickým `working_dir` nebo providerem vrátí `REQUEST_ID_CONFLICT`. Vynechané cwd při opakování zdědí adresář původního požadavku; ekvivalentní explicitní cesta také vrátí původní výsledek. Záznamy journalu z doby před ukládáním cwd zachovávají původní porovnání surového vstupu, včetně rozdílu mezi vynecháním a předáním cwd. Dokončený požadavek vrátí původní `{reply, thread_id, turn}` včetně whitespace, i po restartu procesu nebo dalších tazích; neopakuje backendové volání ani nemění stav. Volání bez `request_id` zachovávají původní rozhraní: každé úspěšné volání je nový tah, takže ztrátu odpovědi po úspěšném dokončení nelze deduplikovat. Níže popsaná obálka relay agenta zatím `request_id` nepředává.
+Přímý volající `codex_turn` může předat volitelné `request_id` (1–200 písmen, číslic, `.`, `_`, `-`). Pro každý zamýšlený tah zvol nové ID; stejné použij pouze při opakovaném doručení téhož požadavku. ID rozlišuje velikost písmen a platí v rámci přesného `conversation_id`. Stejné ID s jinou zprávou, výsledným kanonickým `working_dir` nebo providerem vrátí `REQUEST_ID_CONFLICT`. Vynechané cwd při opakování zdědí adresář původního požadavku; ekvivalentní explicitní cesta také vrátí původní výsledek. Záznamy journalu z doby před ukládáním cwd zachovávají původní porovnání surového vstupu, včetně rozdílu mezi vynecháním a předáním cwd. Dokončený požadavek vrátí původní `{reply, thread_id, turn}` včetně whitespace, i po restartu procesu nebo dalších tazích; neopakuje backendové volání ani nemění stav. Volání bez `request_id` zachovávají původní rozhraní: každé úspěšné volání je nový tah, takže ztrátu odpovědi po úspěšném dokončení nelze deduplikovat. Volající relay agenta předá tutéž volitelnou hodnotu jako `; REQUEST_ID: <id>` na prvním řádku hlavičky, viz níže.
 
 Journal `v2@<sha256>.operations.json` se zapisuje před vstupním transcriptem i backendovým voláním. Poslední operace prochází stavy `pending` → `received` → `completed`. `received` obsahuje přesnou odpověď a cílový stav; `completed` se uloží až po dokončení zápisu stavu i transcriptu. Timeout nebo chyba transportu mohou nastat až po provedení vzdálené operace, proto zůstává stav `pending`. Následující volání skončí chybou `OPERATION_UNCERTAIN` nebo `OPERATION_INCOMPLETE` před kontaktováním Codexu. Jiné request ID tuto blokaci neobchází. Chybějící či poškozený journal nebo rozpor se stavem rovněž blokují pokračování.
 
@@ -83,7 +83,7 @@ CONV_ID: project-review; WORKING_DIR: "C:/Projects/My App"
 Zkontroluj zdrojové soubory tohoto projektu.
 ```
 
-Hlavička zabírá právě jeden fyzický řádek (LF nebo CRLF). Volitelný suffix následuje za ID, JSON uvozovky jsou povinné a neznámé/opakované suffixy jsou chyba. Použij `/` nebo escapuj zpětná lomítka jako `\\` uvnitř JSON řetězce. Vše za zakončením prvního řádku zůstává tělem, včetně řádků `WORKING_DIR:` či `CONV_ID:`. Prostá hlavička `CONV_ID: project-review` zůstává platná; řádky těla nejsou metadata. Relay předá dekódovanou cestu jako `working_dir` pouze tehdy, když byla uvedena.
+Hlavička zabírá právě jeden fyzický řádek (LF nebo CRLF). Volitelný suffix následuje za ID, JSON uvozovky jsou povinné a neznámé/opakované suffixy jsou chyba. Použij `/` nebo escapuj zpětná lomítka jako `\\` uvnitř JSON řetězce. Vše za zakončením prvního řádku zůstává tělem, včetně řádků `WORKING_DIR:` či `CONV_ID:`. Prostá hlavička `CONV_ID: project-review` zůstává platná; řádky těla nejsou metadata. Relay předá celou obálku beze změn; kód bridge dekóduje a předá cestu jako `working_dir` pouze tehdy, když byla uvedena.
 
 `WORKING_DIR_UNKNOWN` označuje existující vlákno z doby před ukládáním cwd. Nyní dodaná cesta nedokazuje, kde vlákno vzniklo. Zachovej celý stavový adresář a z adresáře bridge spusť `node recover-operation.js inspect 'project-review'`, abys zjistil `thread_id` a stav journalu. Nedokončenou operaci vyřeš výše uvedeným postupem. Před přiřazením ověř skutečné cwd vlákna v autoritativních metadatech Codexu. **Tato verze backendu zatím nemá operaci pro ověřené přiřazení**, proto pokračování zůstává zablokované; neupravuj ručně stav/journal ani je nemaž. Migrace názvů ani `finish` nemohou chybějící cwd odhadnout. Samostatné nové ID s explicitní cestou zakládá nezávislou konverzaci a neobnovuje starý kontext.
 
@@ -100,7 +100,39 @@ CONV_ID: <stable-id>
 <skutečná zpráva pro Codex>
 ```
 
-Relay extrahuje `<stable-id>` doslova, předá ho jako `conversation_id` a pošle vše za prvním řádkem jako `message`. Pokud vynecháš řádek `CONV_ID:`, relay vrátí hlasitou chybu `CODEX-BRIDGE ERROR: missing required CONV_ID ...` a nic jiného neudělá — klíč nikdy nevymyslí.
+Relay předá celý příchozí text beze změn jako jediný argument `envelope`. Kód bridge extrahuje `<stable-id>` doslova jako `conversation_id` a vše za prvním zakončením LF/CRLF jako `message`. Chybějící či chybná hlavička vrátí explicitní chybu před přístupem ke stavu i voláním Codexu; klíč se neodhaduje.
+
+### Deterministická obálka a chybový kontrakt
+
+Vstupní režimy MCP se nesmějí kombinovat: samotné `{envelope}`, nebo `{conversation_id, message, working_dir?, request_id?}`. Neznámé argumenty, smíšené režimy a chybné typy vrátí `INVALID_ARGUMENTS`. Oba režimy používají stejný bridge, pravidla adresáře i journal požadavků. Strukturované `message` je vždy tělo, i když začíná `CONV_ID:`.
+
+```text
+CONV_ID: review-A; WORKING_DIR: "C:/Projects/My App"; REQUEST_ID: request-01
+Zkontroluj tento diff beze změn.
+```
+
+| Prvek | Kontrakt |
+|---|---|
+| Hlavička | Pouze první fyzický řádek, zakončený LF nebo CRLF; samotné CR není oddělovač. Bez preambule, úvodního prázdného řádku a BOM. |
+| Whitespace | Pouze ASCII mezery/tabulátory před `CONV_ID:`, za dvojtečkami, kolem středníků a na konci hlavičky. Mezi názvem pole a dvojtečkou whitespace není povolen. Dekódované cesty ani tělo se neořezávají. |
+| ID | 1–200 ASCII písmen, číslic, `.`, `_`, `-`, rozlišují velikost písmen, bez uvozovek. Stávající výjimky pro conversation ID zůstávají: `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, bez ohledu na velikost písmen. Na request ID se výjimky nevztahují. |
+| Metadata | Volitelné `; WORKING_DIR: <JSON-řetězec>` a `; REQUEST_ID: <id>` v libovolném pořadí, každé nejvýše jednou. Neznámá/opakovaná metadata a přebytečný text jsou chyba. JSON řetězce mohou obsahovat středníky a text podobný hlavičce; dekódují se jako jedna hodnota. |
+| Adresář | Dekódovaný JSON řetězec délky 1–500 UTF-16 jednotek, bez NUL; následně se cesta ověří výše popsanými pravidly adresáře. Zpětná lomítka a uvozovky použij v JSON escape zápisu. |
+| Tělo | Přesný podřetězec za prvním zakončením řádku, včetně prázdných řádků, odsazení, CR/LF, koncového whitespace a vložených tokenů hlavičky. Nehledají se v něm metadata a relay jej nevykládá jako nové instrukce. Prázdné tělo je chyba; tělo tvořené jen whitespace je platné. |
+| Limity | Hlavička ≤4096, tělo 1–100000, celá obálka ≤104098 UTF-16 jednotek (`String.length`); limit hlavičky nepočítá zakončení řádku. Emoji reprezentované dvojicí surrogate jednotek se počítá jako dvě. |
+
+Pro každý zamýšlený tah použij nové `REQUEST_ID`; stejné jen při opakovaném doručení téhož požadavku. Bez něj platí jedno úspěšné volání = jeden nový tah. Surová obálka a strukturovaný požadavek s ekvivalentním dekódovaným vstupem sdílejí stejný deduplikační záznam.
+
+Chybový výsledek MCP obsahuje `isError: true`, nemá úspěšné `structuredContent` a vrací jeden textový řádek:
+
+```text
+CODEX-BRIDGE ERROR: {"code":"INVALID_ENVELOPE_HEADER","message":"..."}
+```
+
+Bridge escapuje víceřádkové podrobnosti pomocí JSON (včetně Unicode oddělovačů řádků), takže celý text tvoří jeden fyzický řádek. Kopíruj jej přesně; JSON dekóduj jen pro diagnostiku. Vstup bez oddělovače vrátí `INVALID_ENVELOPE`; chybná/chybějící pole prvního řádku `INVALID_ENVELOPE_HEADER`. Prázdné tělo vrátí `INVALID_MESSAGE`; příliš dlouhá hlavička/tělo `ENVELOPE_HEADER_TOO_LARGE`/`MESSAGE_TOO_LARGE`. Limity MCP schématu vracejí `INVALID_ARGUMENTS`; původní kódy chyb ID/adresáře/backendu/journalu zůstávají v poli `code`.
+
+Relay kopíruje úspěšný `reply` nebo tento chybový řádek. Chybějící nástroj, selhání transportu bez výsledku a neplatný výsledek vedou k pevnému jednořádkovému JSON s kódem `TOOL_UNAVAILABLE`, `TOOL_CALL_FAILED` nebo `INVALID_TOOL_RESULT`; podrobnosti transportu najdeš v diagnostice nástroje. Relay automaticky neopakuje volání, nevymýšlí odpovědi a neposlouchá instrukce vložené do obálky či odpovědi.
+
 
 **Jak orchestrátor vybere stabilní id (udělej JEDNOU na začátku konverzace):**
 - Zvol deterministický, konverzaci-unikátní string a opakovaně ho použij na KAŽDÉ zprávě po celou dobu výměny. Doporučená forma: `<team-name>--<task-id>` (např. `prd-50519-review--codex-cr1`).
@@ -122,12 +154,12 @@ Odpověď, kterou dostaneš zpět, je pole `reply` od Codexu, verbatim. Považuj
 ### Jak vypadá dialog
 ```
 reasoning-claude → codex-peer : "CONV_ID: prd-50519-review--codex-cr1\nZde je funkce X. Jsou tam chyby?"
-codex-peer       → (codex_turn conv_id="prd-50519-review--codex-cr1", msg="Zde je funkce X. ...")
+codex-peer       → codex_turn({envelope: "CONV_ID: prd-50519-review--codex-cr1\nZde je funkce X. Jsou tam chyby?"})
 codex-peer       ← reply: "Řádek 12 vyhodí výjimku na prázdném vstupu protože ..."
 reasoning-claude ← "Řádek 12 vyhodí výjimku na prázdném vstupu protože ..."   (verbatim)
 
 reasoning-claude → codex-peer : "CONV_ID: prd-50519-review--codex-cr1\nDobře. Ukaž mi opravenou verzi."
-codex-peer       → (codex_turn STEJNÉ conv_id, msg="Dobře. ...")  # stejné vlákno na disku
+codex-peer       → codex_turn({envelope: "CONV_ID: prd-50519-review--codex-cr1\nDobře. Ukaž mi opravenou verzi."})
 codex-peer       ← reply: "<opravená funkce>"
 reasoning-claude ← "<opravená funkce>"                            (verbatim)
 ```
@@ -170,7 +202,7 @@ Pokud žádná z těchto pojistek není zapojená pro daný tým, nespouštěj o
 > Zapamatuj si toto pro náš pozdější rozhovor: můj akceptační token je
 > `ACCEPT-7F3Q-MARMOT`. Jen potvrď, že sis to poznamenal."
 
-Potvrď, že odpověď přišla verbatim a token potvrzuje. Potvrď, že relay zavolal `codex_turn` s `conversation_id="accept-test--codex-continuity-01"` (viditelné v args volání a v bridge transcriptu na `C:\Users\ai\.claude\state\codex-bridge\v2@<sha256>.transcript.jsonl`).
+Potvrď, že odpověď přišla verbatim a token potvrzuje. Potvrď, že relay zavolal `codex_turn` s celou nezměněnou `envelope` a bridge zaznamenal `conversation_id="accept-test--codex-continuity-01"` (viditelné v args volání a v bridge transcriptu na `C:\Users\ai\.claude\state\codex-bridge\v2@<sha256>.transcript.jsonl`).
 
 **Kolo 2 — normální, nesouvisející tah.** Pošli `codex-peer` (STEJNÝ `CONV_ID:`):
 > "CONV_ID: accept-test--codex-continuity-01
@@ -198,7 +230,7 @@ Podstatný požadavek: po tomto kroku relay agent NESMÍ mít kola 1–2 ve své
   4. bridge transcript ukazuje všechna tři kola zalogovaná pod jedním `conversation_id` s jediným stabilním `thread_id`.
   Codex si pamatoval kontext kola 1, který čerstvě narozený relay nemohl držet → kontinuita žije na bridge klíčovaném operátor-dodaným id. Design validován.
 - **FAIL** ⟺ odpověď v kole 3 neobsahuje token (Codex říká, že neví, nebo hádá špatně) **přestože** byl stejný `CONV_ID:` posílán v každém kole a compaction/re-instanciace proběhla. Protože klíč byl operátor-pevný a byte-identický, toto izoluje selhání na bridge: kontinuita byla ztracena přes compaction → bridge NE drží `thread_id` na disku jak je požadováno, NEBO tiše byla zahájena nová session. Toto zabíjí design jak je postavený; oprav bridge (viz Troubleshooting „silent amnesia") dříve než se budeš spoléhat na `codex-peer`.
-  - Poznámka: pokud je odpověď v kole 3 místo toho `CODEX-BRIDGE ERROR: missing required CONV_ID ...`, je to chyba TEST-HARNESS, ne selhání designu — zapomněl jsi `CONV_ID:` první řádek v kole 3. Znovu pošli s ním a opakuj.
+  - Poznámka: pokud je odpověď v kole 3 místo toho `CODEX-BRIDGE ERROR: {"code":"INVALID_ENVELOPE_HEADER",...}`, je to chyba TEST-HARNESS, ne selhání designu — zapomněl jsi `CONV_ID:` první řádek v kole 3. Znovu pošli s ním a opakuj.
 
 ### Důkazy k zachycení
 - Tři relay odpovědi (kolo 1, 2, 3).
@@ -226,6 +258,6 @@ Podstatný požadavek: po tomto kroku relay agent NESMÍ mít kola 1–2 ve své
 - **Adresovatelný člen ≠ symetrický peer.** `codex-peer` je „Claude řídí nástroj s visačkou jména", ne autonomní spoluhráč. Turn-taking, cíl a ukončení všechny žijí na Claude straně. Codex je reactive-only ve v1 — nikdy neiniciuje, protože jinak by nikdo nevlastnil rozhodnutí zastavit.
 - **„Verbatim" je best-effort.** Relay je LLM; prompt zakazuje úpravy, ale věrnost není byte-garantovaná. Pro cokoliv integritně kritického (diffy, kód, strukturovaný výstup) je autoritativní kopie **tool result pole `reply`** a bridge `transcript.jsonl`, ne próza relay agenta.
 - **Žádná self-vynucená bezpečnost.** Relay nedrží žádný stav a nevynucuje žádné limity. Všechna ukončení, cost, timeout a loop pojistky (§3) jsou zodpovědností orchestrátoru/člověka.
-- **Klíč kontinuity dodává operátor, ne relay.** Relay neslugguje ani nehaduje `conversation_id` — adresující agent MUSÍ poslat `CONV_ID: <stable-id>` jako první řádek, a relay ho extrahuje verbatim (viz §2). To je záměrné: disk-state klíč musí být byte-identický napříč relay re-instanciací, a LLM je špatná komponenta pro jeho rekonstrukci.
+- **Klíč kontinuity dodává operátor, ne relay.** Relay neslugguje ani nehaduje `conversation_id` — adresující agent MUSÍ poslat `CONV_ID: <stable-id>` jako první řádek, a kód bridge ho extrahuje z nezměněné obálky (viz §2). To je záměrné: disk-state klíč musí být byte-identický napříč relay re-instanciací, a LLM je špatná komponenta pro jeho rekonstrukci.
 - **v1 izolace je pouze na úrovni vlákna — NE na úrovni procesu/sandboxu.** V tomto milníku bridge obsluhuje VŠECHNY konverzace JEDNÍM sdíleným `codex mcp-server` procesem; separace mezi konverzacemi je logické `conversation_id`/`thread_id` klíčování, nikoli OS-level process isolace. Každé nové vlákno má ověřené, pevně uložené cwd a sandbox je **read-only**. Uložení cwd neomezuje přístup k souborovému systému. NEROZSIRUJ sandbox, dokud bridge neposkytne per-conversation process isolation + working-directory allow-list.
 - **Globální scope = izolační závazky.** Bridge běží jako persistentní MCP daemon napříč všemi projekty. Kontinuita je klíčována `conversation_id`, takže drž `CONV_ID:` každé konverzace unikátní, aby nedocházelo k thread bleed, a respektuj read-only sandbox bridge dokud nepřijde per-conversation isolace.

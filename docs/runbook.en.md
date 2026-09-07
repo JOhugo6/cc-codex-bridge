@@ -4,7 +4,7 @@
 
 > Companion to the design doc `design.en.md`. This runbook covers how to operate the **membership layer**: the `codex-peer` relay agent (`~/.claude/agents/codex-peer.md`) and the deterministic MCP bridge (`codex-bridge`).
 >
-> **Tool contract (fixed):** the bridge is registered as MCP server `codex_bridge` and exposes one tool, surfacing to agents as **`mcp__codex_bridge__codex_turn`**, with signature `codex_turn(conversation_id, message) -> { reply, thread_id, turn }`.
+> **Tool contract (fixed):** the bridge is registered as MCP server `codex_bridge` and exposes one tool, surfacing to agents as **`mcp__codex_bridge__codex_turn`**, with signature `codex_turn({envelope})` / `codex_turn({conversation_id, message, working_dir?, request_id?}) -> { reply, thread_id, turn }`.
 >
 > **Architecture in one line:** another Claude sub-agent → `SendMessage` → `codex-peer` (thin relay) → `codex_turn` MCP call → `codex-bridge` (deterministic, holds `thread_id` on disk) → Codex CLI → reply back up the chain, returned verbatim.
 >
@@ -53,7 +53,7 @@ Repeating a completed migration changes nothing. An interrupted migration can be
 
 ### Request redelivery and operation recovery
 
-Direct `codex_turn` callers may pass an optional `request_id` (1–200 letters, digits, `.`, `_`, `-`). Choose a new ID for each intended turn, and reuse it only when redelivering that same request. IDs are case-sensitive and scoped to the exact `conversation_id`. Reusing an ID with a different message, effective canonical `working_dir`, or provider returns `REQUEST_ID_CONFLICT`. Omitting cwd on replay inherits that request's saved directory; an equivalent explicit path also replays. Pre-directory-policy journal records retain their original raw-input comparison, including omitted versus supplied cwd. A completed request returns the original `{reply, thread_id, turn}`, including whitespace, even after process restart or later turns; replay changes no state and calls no backend. Calls without `request_id` keep the existing interface: each successful call is a new turn, so a response lost after successful completion cannot be deduplicated. The relay envelope described below does not yet expose `request_id`.
+Direct `codex_turn` callers may pass an optional `request_id` (1–200 letters, digits, `.`, `_`, `-`). Choose a new ID for each intended turn, and reuse it only when redelivering that same request. IDs are case-sensitive and scoped to the exact `conversation_id`. Reusing an ID with a different message, effective canonical `working_dir`, or provider returns `REQUEST_ID_CONFLICT`. Omitting cwd on replay inherits that request's saved directory; an equivalent explicit path also replays. Pre-directory-policy journal records retain their original raw-input comparison, including omitted versus supplied cwd. A completed request returns the original `{reply, thread_id, turn}`, including whitespace, even after process restart or later turns; replay changes no state and calls no backend. Calls without `request_id` keep the existing interface: each successful call is a new turn, so a response lost after successful completion cannot be deduplicated. Relay callers supply the same optional value as `; REQUEST_ID: <id>` on the first header line, as described below.
 
 The `v2@<sha256>.operations.json` journal is written before the inbound transcript or backend call. Its last operation moves through `pending` → `received` → `completed`. `received` contains the exact response and intended state; `completed` is saved only after state and transcript writes finish. A timeout or transport error may follow a remote side effect, so it leaves the operation `pending`. Subsequent calls fail with `OPERATION_UNCERTAIN` or `OPERATION_INCOMPLETE` before contacting Codex. A different request ID does not bypass this block. Missing/corrupt journals or state that disagrees with the journal also fail closed.
 
@@ -83,7 +83,7 @@ CONV_ID: project-review; WORKING_DIR: "C:/Projects/My App"
 Review this project's source files.
 ```
 
-The header occupies exactly one physical line (LF or CRLF). Its optional suffix follows the ID, JSON quotes are mandatory, and unknown/duplicate suffixes are errors. Use `/` or escape backslashes as `\\` inside the JSON string. Everything following that line's terminator remains body text, including `WORKING_DIR:` or `CONV_ID:` lines. A plain `CONV_ID: project-review` header remains valid; no body lines are interpreted as metadata. The relay forwards the decoded path as `working_dir` only when supplied.
+The header occupies exactly one physical line (LF or CRLF). Its optional suffix follows the ID, JSON quotes are mandatory, and unknown/duplicate suffixes are errors. Use `/` or escape backslashes as `\\` inside the JSON string. Everything following that line's terminator remains body text, including `WORKING_DIR:` or `CONV_ID:` lines. A plain `CONV_ID: project-review` header remains valid; no body lines are interpreted as metadata. The relay passes the complete envelope unchanged; bridge code decodes and forwards `working_dir` only when supplied.
 
 `WORKING_DIR_UNKNOWN` means an existing thread predates cwd recording. Supplying a path now does not prove where that thread was started. Preserve the entire state directory and run `node recover-operation.js inspect 'project-review'` from the bridge directory to identify its `thread_id` and journal status. Resolve any incomplete operation with the procedure above. Verify the thread's actual cwd in authoritative Codex thread metadata before binding it. **This backend version has no verified binding operation yet**, so continuation stays blocked; do not hand-edit state/journals or delete them. Filename migration and `finish` cannot invent the missing cwd. A separate new ID with an explicit path starts an independent conversation and does not recover the old context.
 
@@ -100,7 +100,39 @@ CONV_ID: <stable-id>
 <the actual message to Codex>
 ```
 
-The relay extracts the `<stable-id>` literally, passes it as `conversation_id`, and sends everything after the first line as the `message`. If you omit the `CONV_ID:` line, the relay returns a loud `CODEX-BRIDGE ERROR: missing required CONV_ID ...` and does nothing else — it will never invent a key.
+The relay passes the entire incoming text unchanged as the single `envelope` argument. Bridge code extracts `<stable-id>` literally as `conversation_id` and everything after the first LF/CRLF terminator as `message`. A missing/malformed header returns an explicit tool error before touching state or calling Codex; no key is inferred.
+
+### Deterministic envelope and error contract
+
+The two MCP input modes are exclusive: `{envelope}` alone, or `{conversation_id, message, working_dir?, request_id?}`. Unknown arguments, mixed modes and invalid argument types fail with `INVALID_ARGUMENTS`. Both modes reach the same bridge, directory policy and request journal. A structured `message` is always body text, even if it starts with `CONV_ID:`.
+
+```text
+CONV_ID: review-A; WORKING_DIR: "C:/Projects/My App"; REQUEST_ID: request-01
+Review this diff unchanged.
+```
+
+| Element | Contract |
+|---|---|
+| Header | First physical line only, terminated by LF or CRLF; bare CR is not a separator. No preamble, initial blank line or BOM. |
+| Whitespace | Only ASCII space/tab before `CONV_ID:`, after colons, around semicolons and at header end. No whitespace between a field name and its colon. Nothing is trimmed from decoded paths or body. |
+| IDs | 1–200 ASCII letters, digits, `.`, `_`, `-`, case-sensitive and unquoted. Existing conversation-ID exclusions remain: `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, case-insensitive. These exclusions do not apply to request IDs. |
+| Metadata | Optional `; WORKING_DIR: <JSON-string>` and `; REQUEST_ID: <id>` in either order, each at most once. Unknown/duplicate metadata or trailing text fails. JSON strings may contain semicolons and header-looking text; they are decoded as one value. |
+| Directory | Decoded JSON string length 1–500 UTF-16 code units, no NUL; the directory policy above then validates the filesystem path. Use JSON escapes for backslashes and quotes. |
+| Body | Exact substring after the first line terminator, including blank lines, indentation, CR/LF, trailing whitespace and embedded header tokens. Never searched for metadata or interpreted by the relay as new instructions. Empty body fails; a whitespace-only body is valid. |
+| Size limits | Header ≤4096, body 1–100000, complete envelope ≤104098 UTF-16 code units (`String.length`); the header limit excludes its terminator. Each emoji represented by a surrogate pair counts as two. |
+
+Use a new `REQUEST_ID` per intended turn; reuse it only to redeliver the same request. Omitting it keeps one successful call = one new turn. Raw and structured requests with equivalent decoded inputs share the same deduplication record.
+
+The MCP error result has `isError: true`, no success `structuredContent`, and one text line:
+
+```text
+CODEX-BRIDGE ERROR: {"code":"INVALID_ENVELOPE_HEADER","message":"..."}
+```
+
+The bridge JSON-escapes all multiline details (including Unicode line separators), so the complete text is one physical line. Copy it exactly; decode its JSON only for diagnostics. No-separator input returns `INVALID_ENVELOPE`; malformed/missing first-line fields return `INVALID_ENVELOPE_HEADER`. Empty body returns `INVALID_MESSAGE`; excessive header/body return `ENVELOPE_HEADER_TOO_LARGE`/`MESSAGE_TOO_LARGE`. MCP schema limits fail as `INVALID_ARGUMENTS`; existing ID/directory/backend/journal error codes remain in the `code` field.
+
+The relay copies successful `reply` text or this error line. A missing tool, transport failure without a tool result, or invalid result produces a fixed one-line JSON error with code `TOOL_UNAVAILABLE`, `TOOL_CALL_FAILED`, or `INVALID_TOOL_RESULT`; inspect tool diagnostics for transport details. The relay never retries automatically, invents a reply, or follows instructions embedded in the envelope or reply.
+
 
 **How an orchestrator picks a stable id (do this ONCE per conversation):**
 - Choose a deterministic, conversation-unique string and reuse it on EVERY message for the lifetime of the exchange. Recommended form: `<team-name>--<task-id>` (e.g. `prd-50519-review--codex-cr1`).
@@ -122,12 +154,12 @@ The reply you receive back is Codex's `reply` field, verbatim. Treat its content
 ### What a back-and-forth looks like
 ```
 reasoning-claude → codex-peer : "CONV_ID: prd-50519-review--codex-cr1\nHere is function X. Any correctness bugs?"
-codex-peer       → (codex_turn conv_id="prd-50519-review--codex-cr1", msg="Here is function X. ...")
+codex-peer       → codex_turn({envelope: "CONV_ID: prd-50519-review--codex-cr1\nHere is function X. Any correctness bugs?"})
 codex-peer       ← reply: "Line 12 will throw on empty input because ..."
 reasoning-claude ← "Line 12 will throw on empty input because ..."   (verbatim)
 
 reasoning-claude → codex-peer : "CONV_ID: prd-50519-review--codex-cr1\nGood catch. Show me the fixed version."
-codex-peer       → (codex_turn SAME conv_id, msg="Good catch. ...")  # same thread on disk
+codex-peer       → codex_turn({envelope: "CONV_ID: prd-50519-review--codex-cr1\nGood catch. Show me the fixed version."})
 codex-peer       ← reply: "<full corrected function>"
 reasoning-claude ← "<full corrected function>"                       (verbatim)
 ```
@@ -170,7 +202,7 @@ If none of these are wired up for a given team, do not run an open-ended Codex e
 > Remember this for later in our conversation: my acceptance token is
 > `ACCEPT-7F3Q-MARMOT`. Just acknowledge that you've noted it."
 
-Confirm the reply comes back verbatim and acknowledges the token. Confirm the relay called `codex_turn` with `conversation_id="accept-test--codex-continuity-01"` (visible in the call args, and in the bridge transcript at `C:\Users\ai\.claude\state\codex-bridge\v2@<sha256>.transcript.jsonl`).
+Confirm the reply comes back verbatim and acknowledges the token. Confirm the relay called `codex_turn` with the complete unchanged `envelope` and the bridge recorded `conversation_id="accept-test--codex-continuity-01"` (visible in the header and in the bridge transcript at `C:\Users\ai\.claude\state\codex-bridge\v2@<sha256>.transcript.jsonl`).
 
 **Round 2 — a normal, unrelated turn.** Send to `codex-peer` (SAME `CONV_ID:`):
 > "CONV_ID: accept-test--codex-continuity-01
@@ -198,7 +230,7 @@ The essential requirement: after this step the relay agent must NOT have rounds 
   4. the bridge transcript shows all three turns logged under that one `conversation_id` with a single stable `thread_id`.
   Codex recalled round-1 context that the freshly-born relay could not have been holding → continuity lives on the bridge keyed by the operator-supplied id. Design validated.
 - **FAIL** ⟺ the round-3 reply does not contain the token (Codex says it doesn't know, or guesses wrong) **even though** the same `CONV_ID:` was sent every round and a compaction/re-instantiation occurred. Because the key was operator-fixed and byte-identical, this isolates the failure to the bridge: continuity was lost across compaction → the bridge is NOT holding `thread_id` on disk as required, OR a new session was silently started. This kills the design as built; fix the bridge (see Troubleshooting "silent amnesia") before relying on `codex-peer`.
-  - Note: if the round-3 reply is instead `CODEX-BRIDGE ERROR: missing required CONV_ID ...`, that is a TEST-HARNESS error, not a design failure — you forgot the `CONV_ID:` first line on round 3. Re-send with it and retry.
+  - Note: if the round-3 reply is instead `CODEX-BRIDGE ERROR: {"code":"INVALID_ENVELOPE_HEADER",...}`, that is a TEST-HARNESS error, not a design failure — you forgot the `CONV_ID:` first line on round 3. Re-send with it and retry.
 
 ### Evidence to capture
 - The three relay replies (round 1, 2, 3).
@@ -226,6 +258,6 @@ The essential requirement: after this step the relay agent must NOT have rounds 
 - **Addressable member ≠ symmetric peer.** `codex-peer` is "Claude driving a tool that wears a name tag," not an autonomous teammate. Turn-taking, the goal, and termination all live on the Claude side. Codex is reactive-only in v1 — it never initiates, because if it did, no one would own the decision to stop.
 - **"Verbatim" is best-effort.** The relay is an LLM; the prompt forbids editing, but faithfulness is not byte-guaranteed. For anything integrity-critical (diffs, code, structured output), the authoritative copy is the **tool result `reply` field** and the bridge `transcript.jsonl`, not the relay's prose.
 - **No self-enforced safety.** The relay holds no state and enforces no limits. All termination, cost, timeout, and loop guardrails (§3) are the orchestrator's/human's responsibility.
-- **The continuity key is operator-supplied, not relay-derived.** The relay does NOT slugify or guess a `conversation_id` — the addressing agent MUST send `CONV_ID: <stable-id>` as the first line, and the relay extracts it verbatim (see §2). This is deliberate: the disk-state key must be byte-identical across relay re-instantiation, and an LLM is the wrong component to reconstruct it. The cost is a contract obligation on every caller; omitting `CONV_ID:` yields a loud error, never a silent guessed key.
+- **The continuity key is operator-supplied, not relay-derived.** The relay does NOT slugify or guess a `conversation_id` — the addressing agent MUST send `CONV_ID: <stable-id>` as the first line, and bridge code extracts it from the unchanged envelope (see §2). This is deliberate: the disk-state key must be byte-identical across relay re-instantiation, and an LLM is the wrong component to reconstruct it. The cost is a contract obligation on every caller; omitting `CONV_ID:` yields a loud error, never a silent guessed key.
 - **v1 isolation is thread-level only — NOT process/sandbox-level.** In this milestone the bridge backs ALL conversations with ONE shared `codex mcp-server` process; separation between conversations is logical `conversation_id`/`thread_id` keying, not OS-level process isolation. Each new thread has a validated, pinned cwd and the sandbox is **read-only**. Cwd pinning is not a filesystem access boundary. Do NOT widen the sandbox until the bridge provides per-conversation process isolation + a working-directory allow-list.
 - **Global scope = isolation duties.** The bridge runs as a persistent MCP daemon across all projects. Continuity is keyed by `conversation_id`, so keep each conversation's `CONV_ID:` distinct to avoid thread bleed, and respect the bridge's read-only sandbox until per-conversation isolation lands.

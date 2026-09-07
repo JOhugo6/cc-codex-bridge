@@ -65,12 +65,13 @@ Zkontroluj zdrojové soubory tohoto projektu.
 
 Cesta je JSON řetězec; `/` usnadňuje zápis Windows cest bez escapování zpětných lomítek. Metadata jsou pouze na prvním řádku, tělo se předává beze změn. Bridge ověří adresář a uloží jeho kanonickou cestu k vláknu. V dalších zprávách ji můžeš vynechat; jiný adresář bude odmítnut. Bez explicitní cesty v prvním tahu se použije adresář procesu bridge zachycený při jeho startu. Vůči němu se vyhodnocují i relativní cesty, proto preferuj absolutní cestu projektu. Starší vlákna bez uloženého adresáře čekají na ověření; viz [diagnostika adresáře](docs/runbook.md#pracovní-adresář-a-starší-vlákna).
 
+Relay předává celou zprávu jako `codex_turn({envelope: "CONV_ID: ...\n..."})`; první řádek parsuje kód bridge. Použij LF nebo CRLF, bez úvodního prázdného řádku, BOM či preambule. Whitespace hlavičky tvoří pouze ASCII mezery/tabulátory. Neprázdné tělo se zachová přesně, včetně prázdných řádků a textu podobného hlavičce. Volitelné `; REQUEST_ID: request-01` na stejném prvním řádku umožní bezpečné opakované doručení; pro nový zamýšlený tah použij nové request ID a stejné pouze pro opakování daného požadavku. Pořadí metadat je libovolné; opakovaná/neznámá metadata jsou chyba. Přímí volající mohou dál používat `{conversation_id, message, working_dir?, request_id?}`; smíchání režimů a neznámé argumenty se odmítnou. Limity a formáty chyb popisuje [úplný vstupní a chybový kontrakt](docs/runbook.md#deterministická-obálka-a-chybový-kontrakt).
+
 ### V Claude Code týmu
 
 ```python
 # Příklad: orchestrátor posílá zprávu codex-peer
-SendMessage(to="codex-peer", message="""
-CONV_ID: sprint42--arch-review
+SendMessage(to="codex-peer", message="""CONV_ID: sprint42--arch-review
 Navrhujeme novou caching vrstvu. Jaké jsou trade-offy mezi
 write-through a write-back strategiemi pro náš use case?
 """)
@@ -79,8 +80,7 @@ write-through a write-back strategiemi pro náš use case?
 Poté, v čerstvě spuštěném session:
 
 ```python
-SendMessage(to="codex-peer", message="""
-CONV_ID: sprint42--arch-review
+SendMessage(to="codex-peer", message="""CONV_ID: sprint42--arch-review
 Na základě trade-offů, které jsi popsal, co bys doporučil pro
 read-heavy workload s občasnými burst writes?
 """)
