@@ -34,7 +34,7 @@ async function forTurn(prior, supplied, base) {
     throw failure('WORKING_DIR_UNKNOWN', 'This existing thread has no verified working_dir in bridge state. ' +
       'Supplying a directory cannot establish the original Codex cwd. Preserve its state and journal; ' +
       'run recover-operation.js inspect to identify the thread and follow the runbook directory diagnostics. ' +
-      'This backend has no verified cwd binding operation; a new conversation_id would be a separate conversation.');
+      'The selected backend did not provide verified thread metadata; a new conversation_id would be a separate conversation.');
   }
   const pinned = await normalize(prior.working_dir, base);
   if (pinned !== prior.working_dir) {

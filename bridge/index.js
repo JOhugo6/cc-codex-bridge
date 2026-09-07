@@ -33,7 +33,7 @@ console.warn = (...a) => process.stderr.write(a.map(String).join(' ') + '\n');
 function makeBackend() {
   // Test seam: CODEX_BRIDGE_BACKEND can point at a module exporting `createBackend()` so the
   // MCP server can be driven over stdio against a deterministic stub (no real Codex). Production
-  // never sets this and uses the native `codex mcp-server` child.
+  // never sets this and uses the native `codex app-server` child.
   //
   // MINOR-15: guard this override so it cannot be used in production to load arbitrary modules.
   // Allow only when NODE_ENV !== 'production' OR when the value is an absolute path. Reject
@@ -121,7 +121,7 @@ async function main() {
       throw new McpError(code, `${err.code || 'RESOURCE_READ_FAILED'}: ${err.message}`);
     }
   });
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       try {
         if (request.params.name !== 'codex_turn') {
           throw Object.assign(new Error('Unknown tool; this server exposes only codex_turn.'), { code: 'UNKNOWN_TOOL' });
@@ -130,7 +130,7 @@ async function main() {
           throw Object.assign(new Error('codex_turn does not support task-augmented calls.'), { code: 'INVALID_ARGUMENTS' });
         }
         const { conversation_id, message, working_dir, request_id } = parseToolInput(request.params.arguments);
-        const out = await bridge.turn(conversation_id, message, { working_dir, request_id });
+        const out = await bridge.turn(conversation_id, message, { working_dir, request_id, signal: extra.signal });
         outputSchema.parse(out);
         return {
           // Keep the compatible reply field/text block; expose immutable bytes directly to
@@ -152,7 +152,10 @@ async function main() {
   await server.connect(transport);
   elog('codex-bridge MCP server started on stdio (tool: codex_turn)');
 
+  let shuttingDown = false;
   const shutdown = async (sig) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     elog('shutting down on', sig);
     try {
       await backend.close();
@@ -163,6 +166,13 @@ async function main() {
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+  // The SDK's server transport listens for data/error, but does not emit onclose on EOF.
+  // Handle the pipe lifecycle directly; client.close() may otherwise mask this by killing us.
+  process.stdin.once('end', () => { void shutdown('stdin EOF'); });
+  process.stdin.once('close', () => { void shutdown('stdin closed'); });
+  if (process.stdin.readableEnded || process.stdin.destroyed) void shutdown('stdin already closed');
+  const transportClosed = transport.onclose;
+  transport.onclose = () => { transportClosed?.(); void shutdown('stdio closed'); };
 }
 
 main().catch((err) => {

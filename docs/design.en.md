@@ -36,7 +36,7 @@ Honestly: this gives you an **addressable member, not a symmetric peer**. The re
   ┌─────────────┐   SendMessage    ┌──────────────┐   MCP tool call   ┌──────────────────┐   spawn/stdio   ┌────────────┐
   │ other Claude│ ───────────────▶ │  codex-peer  │ ────────────────▶ │  codex-bridge    │ ──────────────▶ │  Codex CLI │
   │  sub-agent  │ ◀─────────────── │ (thin shell  │ ◀──────────────── │ (DETERMINISTIC   │ ◀────────────── │ (codex     │
-  └─────────────┘   verbatim reply │  in ~/.claude│   reply + meta    │  bridge, owns    │   reply         │ mcp-server)│
+  └─────────────┘   verbatim reply │  in ~/.claude│   reply + meta    │  bridge, owns    │   reply         │ app-server)│
                                    │   /agents/)  │                   │  state on disk)  │                 └────────────┘
                                    └──────────────┘                   └──────┬───────────┘
                                                                               │ persists
@@ -64,9 +64,9 @@ Behavior (deterministic, no LLM):
 3. Call Codex, journal its reply and artifact metadata, publish immutable UTF-8 bytes, commit state/transcript and mark the operation completed. Unlock and return `reply` + metadata. A local failure is recovered from the recorded response without repeating the backend call.
 4. If a session cannot be obtained/restored → **return a loud error** (never silently "new session" — that is the amnesia).
 
-**Backing for Codex:** the bridge spawns a native `codex mcp-server` as a child and speaks MCP to it — `codex()` (returns `structuredContent.threadId`) and `codex-reply(threadId, …)`. The thread keeps the conversation **and file state** coherent.
+**Backing for Codex:** the bridge spawns native `codex app-server` and speaks stdio JSONL. Each connection initializes once; turns use `thread/start` or verified `thread/read` + `thread/resume`, then `turn/start`. The saved thread ID is checked on every resume. Final completed agent messages supply the exact reply; progress and deltas are not reply text. Sandbox and approvals are explicitly read-only/never.
 
-> **Note:** The `codex exec resume <session>` alternative has a known hang bug — do not use as primary.
+> The former `codex mcp-server` backend is deprecated. See [official App Server protocol](https://learn.chatgpt.com/docs/app-server) and [deprecation notice](https://learn.chatgpt.com/docs/mcp-server). The public `codex_turn` MCP interface is unchanged.
 
 ### 4.2 State on disk (NOT in LLM context)
 
@@ -144,17 +144,17 @@ If it passes → architecture holds. See runbook §4 for the detailed procedure.
 
 1. Does the Agent Teams framework keep `codex-peer` as a **persistent instance** between separate `SendMessage` exchanges, or does it re-instantiate? (If re-instantiated, all the more reason for `thread_id` to live on disk — which the design already does.)
 2. Will the framework allow registering a **non-Claude addressable endpoint** directly? (If yes → the relay shell disappears, the bridge becomes a member directly.)
-3. Do two different exchanges share the same `codex mcp-server` process (cross-talk risk), or does the bridge spawn an instance per `conversation_id`? Recommended: per-conversation isolation.
+3. Do two different exchanges share the same `codex app-server` process (cross-talk risk), or does the bridge spawn an instance per `conversation_id`? Recommended: per-conversation isolation.
 
 ## 9. Honest limitations
 
 - Addressable member, **not** a symmetric peer. If the CLI side ever *initiates*, there is no one to decide on termination → keep reactive-only.
 - "Verbatim" relay is best-effort; integrity-critical data (diffs, structured output) should be taken from the tool result, not from the relay's prose.
 - Global scope = security and isolation obligations (see §6).
-- **v1 isolation is thread-level only — NOT process/cwd/sandbox-level.** A single shared `codex mcp-server` process backs all conversations; separation between conversations is only the logical `conversation_id`/`thread_id` keying, not OS-level process isolation. Do not widen the sandbox until the bridge provides per-conversation process isolation.
+- **v1 isolation is thread-level only — NOT process/cwd/sandbox-level.** A single shared `codex app-server` process backs all conversations; separation between conversations is only the logical `conversation_id`/`thread_id` keying, not OS-level process isolation. Do not widen the sandbox until the bridge provides per-conversation process isolation.
 
 ## 10. References
 
-- Codex as MCP server: https://codex.danielvaughan.com/2026/05/12/codex-cli-agents-sdk-mcp-server-multi-agent-workflows/
+- Codex App Server: https://learn.chatgpt.com/docs/app-server
 - Codex non-interactive / exec: https://developers.openai.com/codex/noninteractive · hang bug `exec resume`: https://github.com/openai/codex/issues/14470
 - MCP vs A2A: https://workos.com/guide/understanding-mcp-acp-a2a

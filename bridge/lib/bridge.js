@@ -107,7 +107,14 @@ class CodexBridge {
         if (replay) return replay;
       }
       operations.assertComplete(journal, conversationId);
-      const cwd = await workingDir.forTurn(prior, opts.working_dir, this.defaultWorkingDir);
+      // A read-only metadata lookup can establish legacy cwd, but never edits prior state or
+      // journal history. The normal durable operation records and commits the verified binding.
+      let directoryState = prior;
+      if (prior?.thread_id && prior.working_dir === undefined && typeof this.backend.getThreadWorkingDir === 'function') {
+        const verified = await this.backend.getThreadWorkingDir(prior.thread_id, { signal: opts.signal });
+        directoryState = { ...prior, working_dir: verified };
+      }
+      const cwd = await workingDir.forTurn(directoryState, opts.working_dir, this.defaultWorkingDir);
       const input = { message, working_dir: cwd, working_dir_policy: 'pinned', provider: this.provider };
       const isNew = !prior || !prior.thread_id;
       const turnNumber = (prior && Number.isInteger(prior.turn) ? prior.turn : 0) + 1;
@@ -123,9 +130,9 @@ class CodexBridge {
         if (lockMeta && lockMeta.token) startHeartbeat(lockMeta.token);
 
         if (isNew) {
-          result = await this.backend.startSession(message, { cwd });
+          result = await this.backend.startSession(message, { cwd, ...(opts.signal ? { signal: opts.signal } : {}) });
         } else {
-          result = await this.backend.continueSession(prior.thread_id, message);
+          result = await this.backend.continueSession(prior.thread_id, message, { cwd, ...(opts.signal ? { signal: opts.signal } : {}) });
         }
       } catch (err) {
         // LOUD failure. We do NOT fall back to a fresh session on a resume failure.

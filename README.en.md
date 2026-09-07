@@ -12,7 +12,7 @@ Other Claude sub-agent
        └─ codex-peer (thin relay, model: sonnet)
             └─ codex_turn MCP tool
                  └─ codex-bridge (deterministic Node server)
-                      └─ codex mcp-server (real Codex CLI)
+                      └─ codex app-server (real Codex CLI)
                            └─ ~/.claude/state/codex-bridge/v2@<sha256>.json  ← thread_id on disk
 ```
 
@@ -22,7 +22,7 @@ Other Claude sub-agent
 |---|---|---|
 | Node.js | v20 | `node --version` |
 | Claude Code CLI | current | `claude --version`, must be authenticated |
-| OpenAI Codex CLI | v0.133+ | `codex --version`, must be authenticated |
+| OpenAI Codex CLI | v0.153.4 | `codex --version`, must be authenticated |
 | PowerShell | 7 (pwsh) | for install script |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `=1` | set in your environment |
 
@@ -108,7 +108,7 @@ npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" run smoke
 - **Hard-error on lost session.** A failed resume throws loudly — never silently starts a fresh session (which would be invisible amnesia).
 - **`model: sonnet` for the relay.** Haiku was unreliable about calling the tool vs. improvising its own answer. Sonnet follows the tool-call instruction reliably.
 - **`CONV_ID:` is operator-supplied.** The relay never derives the key — an LLM-guessed key would be non-deterministic and break cross-spawn continuity.
-- **v1 limitation:** one shared `codex mcp-server` process backs all conversations (thread-level isolation, not process-level). Read-only sandbox by default. Do not widen the sandbox without adding per-conversation process isolation.
+- **v1 limitation:** one shared `codex app-server` process backs all conversations (thread-level isolation, not process-level). Read-only sandbox by default. Do not widen the sandbox without adding per-conversation process isolation.
 
 ## Updating
 
@@ -134,3 +134,7 @@ npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" test   # 47/47 pass
 ## License
 
 MIT
+
+The downstream backend uses native App Server JSONL (`initialize`/`initialized`, `thread/start`, `thread/read`, `thread/resume`, `turn/start`). It is tested with Codex CLI 0.153.4; incompatible protocol responses fail explicitly. The MCP SDK remains a dependency for the public bridge interface. See the [backend lifecycle and verification](docs/runbook.en.md#app-server-backend-and-verification).
+
+On Windows the backend also requires built-in Windows PowerShell 5.1 with `Add-Type` enabled for its Job Object supervisor. The installer includes both helper sources; no separate binary or npm dependency is installed.

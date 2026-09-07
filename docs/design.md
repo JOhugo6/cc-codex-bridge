@@ -36,7 +36,7 @@ A upřímně: tohle dá **adresovatelného člena, ne symetrického peera**. Rea
   ┌─────────────┐   SendMessage    ┌──────────────┐   MCP tool call   ┌──────────────────┐   spawn/stdio   ┌────────────┐
   │ jiný Claude │ ───────────────▶ │  codex-peer  │ ────────────────▶ │  codex-bridge    │ ──────────────▶ │  Codex CLI │
   │  sub-agent  │ ◀─────────────── │ (tenká slupka│ ◀──────────────── │ (DETERMINISTICKÝ │ ◀────────────── │ (codex     │
-  └─────────────┘   verbatim reply │  v ~/.claude/│   reply + meta    │  most, vlastní   │   reply         │ mcp-server)│
+  └─────────────┘   verbatim reply │  v ~/.claude/│   reply + meta    │  most, vlastní   │   reply         │ app-server)│
                                    │   agents/)   │                   │  stav na disku)  │                 └────────────┘
                                    └──────────────┘                   └──────┬───────────┘
                                                                               │ persistuje
@@ -64,9 +64,9 @@ Chování (deterministické, žádný LLM):
 3. Zavolej Codex, ulož odpověď a metadata artefaktu do journalu, publikuj neměnné UTF-8 bajty, zapiš stav/transcript a označ operaci za dokončenou. Odemkni a vrať `reply` + metadata. Lokální selhání se obnovuje z uložené odpovědi bez opakování backendového volání.
 4. Když nelze získat/obnovit session → **vrať hlasitou chybu** (nikdy tiše „nová session" — to je ta amnézie).
 
-**Backing pro Codex:** most si jako child spustí nativní `codex mcp-server` a mluví na něj MCP-em — `codex()` (vrátí `structuredContent.threadId`) a `codex-reply(threadId, …)`. Vlákno drží konverzaci **i stav souborů** koherentně.
+**Backing pro Codex:** bridge spustí nativní `codex app-server` a používá stdio JSONL. Spojení jednou inicializuje; tah vede přes `thread/start` nebo ověřené `thread/read` + `thread/resume`, poté `turn/start`. Při obnovení kontroluje uložené ID vlákna. Přesná odpověď vzniká z dokončených finálních zpráv agenta; průběžné komentáře a delty nejsou odpovědí. Sandbox a approval jsou explicitně read-only/never.
 
-> **Poznámka:** Alternativa `codex exec resume <session>` má čerstvý známý hang bug — nepoužívat jako primární.
+> Původní backend `codex mcp-server` je deprecated. Viz [oficiální protokol App Server](https://learn.chatgpt.com/docs/app-server) a [oznámení deprecation](https://learn.chatgpt.com/docs/mcp-server). Veřejné MCP rozhraní `codex_turn` zůstává stejné.
 
 ### 4.2 Stav na disku (NE v kontextu LLM)
 
@@ -143,17 +143,17 @@ Když projde → architektura sedí. Viz runbook §4 pro detailní proceduru.
 
 1. Drží Agent Teams framework `codex-peer` jako **persistentní instanci** mezi samostatnými `SendMessage` výměnami, nebo re-instancuje? (Pokud re-instancuje, tím spíš musí být `thread_id` na disku — což návrh už dělá.)
 2. Umožní framework zaregistrovat **non-Claude adresovatelný endpoint** přímo? (Pokud ano → odpadá relay slupka, most je rovnou člen.)
-3. Sdílí dvě různé výzvy stejný `codex mcp-server` proces (riziko cross-talk), nebo most spouští instanci per `conversation_id`? Doporučeno: izolace per konverzace.
+3. Sdílí dvě různé výzvy stejný `codex app-server` proces (riziko cross-talk), nebo most spouští instanci per `conversation_id`? Doporučeno: izolace per konverzace.
 
 ## 9. Honest limitations
 
 - Adresovatelný člen, **ne** symetrický peer. Když CLI strana někdy *iniciuje*, není kdo by rozhodl o ukončení → drž reactive-only.
 - „Verbatim" relay je best-effort; integritně kritická data (diffy, strukturovaný výstup) ber z tool resultu, ne z prózy relaye.
 - Globální scope = bezpečnostní a izolační závazky (viz §6).
-- **v1 izolace je pouze na úrovni vlákna — NE na úrovni procesu/cwd/sandboxu.** Jeden sdílený `codex mcp-server` process obsluhuje všechny konverzace; separace je pouze logická (`conversation_id`/`thread_id`), nikoli OS-level. Nerozsiruj sandbox dříve, než bridge nabídne per-conversation process isolation.
+- **v1 izolace je pouze na úrovni vlákna — NE na úrovni procesu/cwd/sandboxu.** Jeden sdílený `codex app-server` process obsluhuje všechny konverzace; separace je pouze logická (`conversation_id`/`thread_id`), nikoli OS-level. Nerozsiruj sandbox dříve, než bridge nabídne per-conversation process isolation.
 
 ## 10. Zdroje
 
-- Codex jako MCP server: https://codex.danielvaughan.com/2026/05/12/codex-cli-agents-sdk-mcp-server-multi-agent-workflows/
+- Codex App Server: https://learn.chatgpt.com/docs/app-server
 - Codex non-interactive / exec: https://developers.openai.com/codex/noninteractive · hang bug `exec resume`: https://github.com/openai/codex/issues/14470
 - MCP vs A2A: https://workos.com/guide/understanding-mcp-acp-a2a

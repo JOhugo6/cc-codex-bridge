@@ -52,8 +52,8 @@ class FakeBackend {
     return { threadId, content: this._nextReply(`started: ${prompt}`) };
   }
 
-  async continueSession(threadId, prompt) {
-    this.calls.push({ kind: 'reply', threadId, prompt });
+  async continueSession(threadId, prompt, extra = {}) {
+    this.calls.push({ kind: 'reply', threadId, prompt, extra });
     if (this.failResume) {
       const e = new Error('fake: lost session / cannot resume');
       e.code = 'FAKE_RESUME_FAIL';

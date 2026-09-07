@@ -48,7 +48,9 @@ async function load(conversationId) {
           !(op.input.working_dir === null || typeof op.input.working_dir === 'string') ||
           !(op.input.working_dir_policy === undefined || (op.input.working_dir_policy === 'pinned' &&
             typeof op.input.working_dir === 'string' && path.isAbsolute(op.input.working_dir))) ||
-          (op.input.working_dir_policy === 'pinned' && op.before && op.before.working_dir !== op.input.working_dir) ||
+          // Legacy state may gain its first cwd after authoritative thread/read verification.
+          // Once present, a pinned directory still cannot change between operations.
+          (op.input.working_dir_policy === 'pinned' && op.before?.working_dir !== undefined && op.before.working_dir !== op.input.working_dir) ||
           !(op.before === null || validState(op.before, conversationId)) ||
           (i > 0 && !isDeepStrictEqual(op.before, journal.operations[i - 1].after))) {
         throw new Error('invalid operation or discontinuous history');
