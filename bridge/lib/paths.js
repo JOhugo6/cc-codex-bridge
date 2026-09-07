@@ -4,15 +4,19 @@
 //
 // Layout (per design §4.2):
 //   <stateDir>/
-//     <conversation_id>.json              { thread_id, turn, created_at, updated_at, provider }
-//     <conversation_id>.transcript.jsonl  1 line per direction: {ts, direction, message, thread_id, turn}
-//     <conversation_id>.lock              advisory file lock (mkdir-based)
+//     v2@<sha256(exact conversation_id)>.json              state including original conversation_id
+//     v2@<sha256(exact conversation_id)>.transcript.jsonl  transcript
+//     v2@<sha256(exact conversation_id)>.operations.json   durable requests and responses
+//     v2@<sha256(exact conversation_id)>.replies/<sha256(operation_id)>.utf8  immutable replies
+//     v2@<sha256(exact conversation_id)>.lock              advisory file lock (mkdir-based)
+// '@' cannot occur in a legacy id, keeping the two namespaces disjoint.
 //
 // The state dir is overridable via CODEX_BRIDGE_STATE_DIR so tests get an isolated temp dir
 // and never collide with the real runtime state.
 
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 function defaultStateDir() {
   // Honor a USERPROFILE / HOME so this resolves the same way the design's absolute paths do.
@@ -24,8 +28,7 @@ function stateDir() {
   return process.env.CODEX_BRIDGE_STATE_DIR || defaultStateDir();
 }
 
-// conversation_id is attacker-adjacent (comes from a relay agent / orchestrator) and is used
-// directly in filenames. Reject anything that could escape the state dir or break the filesystem.
+// Preserve the existing public ID contract. Legacy migration still reads old filenames.
 const SAFE_ID = /^[A-Za-z0-9._-]{1,200}$/;
 
 // Windows reserved device names that are illegal as filenames (even with extensions) on Windows.
@@ -51,28 +54,36 @@ function assertSafeConversationId(id) {
   }
 }
 
-function stateFile(id) {
+function identityKey(id) {
   assertSafeConversationId(id);
-  return path.join(stateDir(), `${id}.json`);
+  return `v2@${crypto.createHash('sha256').update(id, 'utf8').digest('hex')}`;
+}
+
+function stateFile(id) {
+  return path.join(stateDir(), `${identityKey(id)}.json`);
 }
 
 function transcriptFile(id) {
-  assertSafeConversationId(id);
-  return path.join(stateDir(), `${id}.transcript.jsonl`);
+  return path.join(stateDir(), `${identityKey(id)}.transcript.jsonl`);
+}
+
+function operationsFile(id) {
+  return path.join(stateDir(), `${identityKey(id)}.operations.json`);
 }
 
 function lockDir(id) {
-  assertSafeConversationId(id);
   // mkdir-based lock => the lock is a directory, atomic across processes on Windows + POSIX.
-  return path.join(stateDir(), `${id}.lock`);
+  return path.join(stateDir(), `${identityKey(id)}.lock`);
 }
 
 module.exports = {
   defaultStateDir,
   stateDir,
   assertSafeConversationId,
+  identityKey,
   stateFile,
   transcriptFile,
+  operationsFile,
   lockDir,
   SAFE_ID,
 };

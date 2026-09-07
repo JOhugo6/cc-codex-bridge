@@ -1,59 +1,51 @@
 'use strict';
-// OPTIONAL live smoke test: a real 2-turn Codex exchange via the actual `codex mcp-server` backing.
-// SKIPPED unless CODEX_BRIDGE_LIVE=1 (so the default `npm test` never depends on Codex auth/network).
-//
-//   Run with:  CODEX_BRIDGE_LIVE=1 node --test test/live-smoke.test.js
-//   (PowerShell) $env:CODEX_BRIDGE_LIVE=1; node --test test/live-smoke.test.js
-//
-// Validates the design's acceptance core: turn 2 must REMEMBER something stated in turn 1, on the
-// SAME persisted thread_id (multi-turn memory coherence — design §7).
-
+// Opt in with CODEX_BRIDGE_LIVE=1. Uses existing Codex login, temporary state/project,
+// read-only sandbox, two bounded turns and separate bridge + App Server processes.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const os = require('node:os');
 const path = require('node:path');
-const fs = require('node:fs');
-const fsp = require('node:fs/promises');
+const fs = require('node:fs/promises');
+const { spawn } = require('node:child_process');
 
-const LIVE = process.env.CODEX_BRIDGE_LIVE === '1';
-
-test(
-  'live: real 2-turn Codex exchange remembers context on a stable thread_id',
-  { skip: LIVE ? false : 'set CODEX_BRIDGE_LIVE=1 to run (requires authenticated Codex)' },
-  async (t) => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-bridge-live-'));
-    process.env.CODEX_BRIDGE_STATE_DIR = dir;
-    t.after(async () => {
-      delete process.env.CODEX_BRIDGE_STATE_DIR;
-      await fsp.rm(dir, { recursive: true, force: true });
+function runTurn(dir, project, message, requestId) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'live-smoke-turn.js')], {
+      cwd: project, env: { ...process.env, CODEX_BRIDGE_STATE_DIR: path.join(dir, 'state') },
+      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false,
     });
+    let output = '', diagnostics = '';
+    child.stdout.on('data', (chunk) => { output += chunk; });
+    child.stderr.on('data', (chunk) => { diagnostics += chunk; });
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code !== 0) { reject(new Error(`Smoke process exited ${code}: ${diagnostics}`)); return; }
+      try { resolve(JSON.parse(output)); } catch (err) { reject(err); }
+    });
+    child.stdin.end(JSON.stringify({ project, message, requestId }));
+  });
+}
 
-    const { CodexBackend } = require('../lib/codex-backend');
-    const { CodexBridge } = require('../lib/bridge');
-    const backend = new CodexBackend();
-    const bridge = new CodexBridge(backend);
-    t.after(() => backend.close());
-
-    const conv = 'live-smoke';
-    const magic = 'PURPLE-' + Math.random().toString(36).slice(2, 8).toUpperCase();
-
-    const r1 = await bridge.turn(
-      conv,
-      `Remember this exact token: ${magic}. Reply only with the word OK.`
-    );
-    assert.ok(r1.thread_id, 'turn 1 returns a thread_id');
-    assert.equal(r1.turn, 1);
-
-    const r2 = await bridge.turn(
-      conv,
-      'What exact token did I ask you to remember? Reply with just the token.'
-    );
-    assert.equal(r2.turn, 2);
-    assert.equal(r2.thread_id, r1.thread_id, 'thread_id stable across the two turns');
-    assert.match(
-      r2.reply,
-      new RegExp(magic),
-      `Codex must recall the token from turn 1. Got: ${r2.reply}`
-    );
-  }
-);
+test('live App Server: exact context survives bridge and backend process restart',
+  { skip: process.env.CODEX_BRIDGE_LIVE !== '1' && 'set CODEX_BRIDGE_LIVE=1; authenticated Codex required', timeout: 210000 }, async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex bridge live '));
+    const project = path.join(dir, 'empty project'); await fs.mkdir(project);
+    await fs.mkdir(path.join(dir, 'state'));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const magic = 'PURPLE-' + require('node:crypto').randomUUID();
+    const first = await runTurn(dir, project, `Remember this exact token: ${magic}. Reply only OK. Do not use tools.`, 'first');
+    assert.equal(first.result.turn, 1); assert.ok(first.result.thread_id);
+    assert.ok(first.childPid); assert.ok(first.supervisorPid);
+    assert.throws(() => process.kill(first.childPid, 0), { code: 'ESRCH' });
+    assert.throws(() => process.kill(first.supervisorPid, 0), { code: 'ESRCH' });
+    const second = await runTurn(dir, project, 'What exact token did I ask you to remember? Reply with just that token. Do not use tools.', 'second');
+    assert.equal(second.result.turn, 2);
+    assert.equal(second.result.thread_id, first.result.thread_id);
+    assert.equal(second.result.reply.trim(), magic);
+    assert.notEqual(second.childPid, first.childPid);
+    assert.ok(second.childPid); assert.ok(second.supervisorPid);
+    assert.throws(() => process.kill(second.childPid, 0), { code: 'ESRCH' });
+    assert.throws(() => process.kill(second.supervisorPid, 0), { code: 'ESRCH' });
+    assert.deepEqual(await fs.readdir(project), [], 'read-only test leaves project untouched');
+    t.diagnostic(`two separate bridge/App Server processes, thread ${first.result.thread_id}, both Codex children reaped`);
+  });

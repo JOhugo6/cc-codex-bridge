@@ -1,344 +1,226 @@
 'use strict';
-// The backing onto Codex (design §4.1). Chosen mechanism: spawn the native `codex mcp-server`
-// as a child process and speak stdio MCP to it.
-//   - codex(prompt)              -> structuredContent { threadId, content }   [start session]
-//   - codex-reply(threadId, ...) -> structuredContent { threadId, content }   [continue session]
-// Verified live against codex-cli 0.133.0 (see test/probe-codex-mcp.js).
-//
-// We deliberately use the MCP server backing (NOT `codex exec resume`, which has a known hang
-// bug — design §4.1 / sources §10). The thread keeps the conversation AND the working-file state
-// coherent across turns.
-//
-// Windows launch: `codex` on disk is `codex` (PS shim) + `codex.cmd` + `codex.ps1`. A bare
-// spawn('codex') hits the .ps1 shim / fails. We resolve the absolute path to codex.cmd at
-// startup using a PATH walk (MAJOR-5: prevents PATH hijacking) and spawn with shell:false.
-// All of Codex's own chatter goes to ITS stderr, which we forward to OUR stderr — never to our
-// stdout (which carries only our MCP protocol bytes).
-//
-// This module is the SEAM: index.js depends on the interface { startSession, continueSession,
-// close }, and tests inject a fake. No file/disk/lock logic lives here.
-
-const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
-const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
-const path = require('node:path');
+// Native Codex App Server v2 over stdio JSONL (CLI 0.153.4). Public codex_turn stays MCP.
 const fs = require('node:fs');
+const path = require('node:path');
+const { createRequire } = require('node:module');
+const { AppServerTransport, failure } = require('./app-server-transport');
+const workingDir = require('./working-dir');
 
-function log(...args) {
-  // Diagnostics ALWAYS to stderr.
-  process.stderr.write('[codex-backend] ' + args.join(' ') + '\n');
-}
-
-// MAJOR-5: Resolve the absolute path to a command by walking PATH entries. Returns the resolved
-// absolute path or null if not found. Never uses shell:true or relies on ambient PATH resolution
-// at spawn time — that would allow any codex.cmd in the working directory (or earlier PATH entry)
-// to shadow the real one.
-function resolveCommandAbsolute(commandName) {
-  const pathDirs = (process.env.PATH || process.env.Path || '').split(path.delimiter);
-  for (const dir of pathDirs) {
-    if (!dir) continue;
-    const candidate = path.join(dir, commandName);
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return candidate;
-    } catch {
-      // not executable here — try next entry
-    }
-  }
-  return null;
-}
-
-// Resolve the codex command once at module load time so startup errors are surfaced early.
-// On Windows we look for codex.cmd; on POSIX we look for codex. If not found, we record the
-// error and throw CODEX_NOT_FOUND at first use (rather than crashing the module load, which
-// would break the MCP server startup even when a test injects a fake backend).
-let _resolvedCodexPath = null;
-let _resolveError = null;
+function executable(file) { try { fs.accessSync(file, fs.constants.X_OK); return true; } catch { return false; } }
 
 function pickCommand(overrideCommand, overrideArgs) {
-  // Test / alt-launch override: caller provides an explicit absolute path.
   if (overrideCommand) {
-    return { command: overrideCommand, args: overrideArgs || ['mcp-server'], useShell: false };
+    if (!path.isAbsolute(overrideCommand)) throw failure('CODEX_NOT_FOUND', 'Backend command override must be an absolute executable path.');
+    return { command: overrideCommand, args: overrideArgs || ['app-server'], useShell: false };
   }
-
-  // MAJOR-5: resolve absolute path at startup, spawn with shell:false.
-  if (_resolveError) {
-    throw _resolveError;
-  }
-  if (!_resolvedCodexPath) {
-    const commandName = process.platform === 'win32' ? 'codex.cmd' : 'codex';
-    const resolved = resolveCommandAbsolute(commandName);
-    if (!resolved) {
-      const e = new Error(
-        `Cannot find '${commandName}' on PATH. ` +
-          'Install codex-cli (npm install -g @openai/codex) and ensure it is on PATH.'
-      );
-      e.code = 'CODEX_NOT_FOUND';
-      _resolveError = e;
-      throw e;
+  for (const entry of (process.env.PATH || process.env.Path || '').split(path.delimiter)) {
+    const dir = entry.replace(/^"|"$/g, '');
+    if (!path.isAbsolute(dir)) continue;
+    const native = path.join(dir, process.platform === 'win32' ? 'codex.exe' : 'codex');
+    if (executable(native)) return { command: native, args: ['app-server'], useShell: false };
+    if (process.platform !== 'win32' || !executable(path.join(dir, 'codex.cmd'))) continue;
+    // npm .cmd launchers require a shell. Resolve the package's native executable instead,
+    // avoiding quoting and an intermediate process that can orphan Codex on Windows.
+    const pkg = path.join(dir, 'node_modules', '@openai', 'codex', 'package.json');
+    if (!fs.existsSync(pkg)) continue;
+    const target = { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
+    if (!target) continue;
+    const triple = `${target}-pc-windows-msvc`;
+    let vendor;
+    try { vendor = path.join(path.dirname(createRequire(pkg).resolve(`@openai/codex-win32-${process.arch}/package.json`)), 'vendor'); }
+    catch { vendor = path.join(path.dirname(pkg), 'vendor'); }
+    for (const subdir of ['bin', 'codex']) {
+      const command = path.join(vendor, triple, subdir, 'codex.exe');
+      if (executable(command)) return { command, args: ['app-server'], useShell: false };
     }
-    _resolvedCodexPath = resolved;
-    log(`resolved codex: ${_resolvedCodexPath}`);
   }
-  // shell:false — we use the resolved absolute path, not a bare name.
-  return { command: _resolvedCodexPath, args: ['mcp-server'], useShell: false };
+  throw failure('CODEX_NOT_FOUND', 'Cannot resolve native Codex on PATH. Install @openai/codex including its platform package, or put codex.exe on PATH.');
+}
+
+function requireId(value, code, label) {
+  if (typeof value !== 'string' || !value) throw failure(code, `App Server returned no ${label}.`);
+  return value;
 }
 
 class CodexBackend {
   constructor(opts = {}) {
-    this._client = null;
     this._transport = null;
-    this._connecting = null;
-    this._callTimeoutMs = opts.callTimeoutMs || 600000; // upstream turns can be slow
-    // Bounded downstream-readiness probe after the transport handshake. connect() only proves the
-    // pipe opened; a tools/list round-trip proves the Codex child is actually serving requests.
-    this._readinessTimeoutMs = opts.readinessTimeoutMs || 60000;
-    this._overrideCommand = opts.command; // for tests / alt launch
+    this._active = null;
+    this._closed = false;
+    this._callMutexTail = Promise.resolve();
+    this._callTimeoutMs = opts.callTimeoutMs ?? 600000;
+    this._readinessTimeoutMs = opts.readinessTimeoutMs ?? 60000;
+    this._interruptTimeoutMs = opts.interruptTimeoutMs ?? 1000;
+    this._overrideCommand = opts.command;
     this._overrideArgs = opts.args;
     this._cwd = opts.cwd || process.cwd();
-
-    // MAJOR-4: backend-level serialiser — only one callTool in-flight at a time. The Codex CLI
-    // mcp-server is not tested for concurrent calls from different conversations. This mutex is
-    // independent of the per-conversation lock in bridge.js (which serialises within one conversation).
-    // We use a simple promise-chain queue: each call waits for the previous tail before running.
-    this._callMutexTail = Promise.resolve();
   }
 
-  // Race a promise against a timeout. Rejects with a TIMEOUT-coded error if the timer wins.
-  _withTimeout(promise, ms) {
-    let timer;
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => {
-        const e = new Error(`operation exceeded ${ms}ms`);
-        e.code = 'TIMEOUT';
-        reject(e);
-      }, ms);
-      if (timer.unref) timer.unref();
+  async _bounded(promise, ms, signal) {
+    let timer, abort;
+    const stop = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(failure('TIMEOUT', `App Server operation exceeded ${ms}ms.`)), ms);
+      abort = () => reject(failure('CANCELLED', 'Codex request cancelled.'));
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
     });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-  }
-
-  // MAJOR-3: null out _client and _transport so the next call triggers a fresh _ensureConnected().
-  // This is a best-effort reconnect — the per-conversation state on disk remains valid and the
-  // next codex_turn call will restart the backend transparently.
-  _resetConnection(reason) {
-    log('resetting connection:', reason);
-    this._client = null;
-    this._transport = null;
+    try { return await Promise.race([promise, stop]); }
+    finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
   }
 
   async _ensureConnected() {
-    if (this._client) return this._client;
-    if (this._connecting) return this._connecting;
-    this._connecting = (async () => {
-      // MAJOR-5: pickCommand now resolves the absolute path and uses shell:false.
-      const picked = pickCommand(this._overrideCommand, this._overrideArgs);
-      const command = picked.command;
-      const args = picked.args;
-      log(`spawning backend: ${command} ${args.join(' ')} (cwd=${this._cwd})`);
-
-      const transport = new StdioClientTransport({
-        command,
-        args,
-        cwd: this._cwd,
-        // shell:false — we always use the resolved absolute path (MAJOR-5).
-        shell: false,
-        // Forward the child's stderr to ours so Codex diagnostics are visible, not lost.
-        stderr: 'pipe',
-        env: process.env,
-      });
-
-      const client = new Client(
-        { name: 'codex-bridge', version: '1.0.0' },
-        { capabilities: {} }
-      );
-
-      // MAJOR-3: on transport error or close, null out the connection references so the next
-      // call triggers a fresh _ensureConnected(). Best-effort reconnect — disk state is intact.
-      // StdioClientTransport is NOT an EventEmitter — wire callbacks via property assignment,
-      // identical to the onerror pattern already used by the SDK.
-      transport.onerror = (err) => {
-        log('transport error:', err && err.message);
-        this._resetConnection('transport error');
-      };
-      transport.onclose = () => this._resetConnection('transport closed');
-
-      // Pipe child stderr to our stderr as soon as the transport exists.
-      if (transport.stderr) {
-        transport.stderr.on('data', (d) =>
-          process.stderr.write('[codex stderr] ' + d.toString('utf8'))
-        );
-      }
-
-      // M1: bounded cold-start backstop. BOTH the MCP handshake (client.connect -> initialize) AND a
-      // downstream tools/list round-trip must complete within readinessTimeoutMs. A non-MCP / half-
-      // spawned child hangs the initialize itself, so we race connect against a timer too — otherwise
-      // the SDK's own 60s default (or worse) leaks through as a raw -32001 instead of our hard error.
-      try {
-        await this._withTimeout(
-          (async () => {
-            await client.connect(transport);
-            // MINOR-12: A real round-trip proves the child is serving requests. Also assert that
-            // the required tools (codex and codex-reply) are actually advertised.
-            const { tools } = await client.listTools(undefined, { timeout: this._readinessTimeoutMs });
-            const names = (tools || []).map((t) => t.name);
-            const missing = ['codex', 'codex-reply'].filter((n) => !names.includes(n));
-            if (missing.length > 0) {
-              const e = new Error(
-                `Codex mcp-server is missing required tools: ${missing.join(', ')}. ` +
-                  `Available: [${names.join(', ')}].`
-              );
-              e.code = 'BACKEND_NOT_READY';
-              throw e;
-            }
-          })(),
-          this._readinessTimeoutMs
-        );
-      } catch (err) {
-        try {
-          await client.close();
-        } catch {
-          /* ignore */
-        }
-        const wrapped = new Error(
-          `Codex mcp-server did not become ready within ${this._readinessTimeoutMs}ms ` +
-            `(${err && err.message ? err.message : String(err)}).`
-        );
-        wrapped.code = 'BACKEND_NOT_READY';
-        throw wrapped;
-      }
-
-      this._client = client;
-      this._transport = transport;
-      log('backend connected and ready');
-      return client;
-    })();
+    if (this._transport && !this._transport.error) return this._transport;
+    if (this._transport) await this._transport.close();
+    if (this._closed) throw failure('BACKEND_CLOSED', 'Codex backend is closed.');
+    const picked = pickCommand(this._overrideCommand, this._overrideArgs);
+    const conn = new AppServerTransport(picked.command, picked.args, this._cwd);
+    this._transport = conn;
+    conn.finishedTurns = new Set();
     try {
-      return await this._connecting;
-    } finally {
-      this._connecting = null;
+      const result = await this._bounded(conn.request('initialize', {
+        clientInfo: { name: 'codex-bridge', title: 'Codex Bridge', version: '1.0.0' },
+      }), this._readinessTimeoutMs);
+      if (typeof result?.userAgent !== 'string' || !result.userAgent) throw failure('BACKEND_PROTOCOL_ERROR', 'Invalid App Server initialize response.');
+      conn.write({ method: 'initialized', params: {} });
+      return conn;
+    } catch (err) {
+      await conn.close(err);
+      throw failure('BACKEND_NOT_READY', `Codex App Server initialization failed: ${err.message}`);
     }
   }
 
-  // Extract { threadId, content } from an MCP callTool result, tolerating shape drift.
-  // `mode` is 'start' or 'continue'; `priorThreadId` is the thread we asked to resume (continue only).
-  //
-  // CRITICAL (B1): on a CONTINUE, a missing/empty threadId in the response must HARD-ERROR. We must
-  // NEVER borrow priorThreadId to manufacture a same-thread resume — that would launder a lost or
-  // ambiguous session as a healthy one (the #1 forbidden failure). priorThreadId is used ONLY as a
-  // benign fallback on START, where there is no prior session to lie about.
-  _extractReply(result, { mode, priorThreadId } = {}) {
-    const sc = result && result.structuredContent;
-    let threadId = sc && (sc.threadId || sc.thread_id);
-    let content = sc && sc.content;
+  _serial(action, signal) {
+    const queued = this._callMutexTail.then(async () => {
+      if (this._closed) throw failure('BACKEND_CLOSED', 'Codex backend is closed.');
+      if (signal?.aborted) throw failure('CANCELLED', 'Codex request cancelled.');
+      try {
+        return await this._bounded((async () => action(await this._ensureConnected()))(), this._callTimeoutMs, signal);
+      } catch (err) {
+        const conn = this._transport;
+        if (conn) {
+          // An interrupt is best effort, never evidence that an uncertain turn is safe to retry.
+          if (this._active?.turnId && !conn.error) {
+            await this._bounded(conn.request('turn/interrupt', {
+              threadId: this._active.threadId, turnId: this._active.turnId,
+            }), this._interruptTimeoutMs).catch(() => {});
+          }
+          await conn.close(err);
+        }
+        throw err;
+      } finally { this._active = null; }
+    });
+    this._callMutexTail = queued.catch(() => {});
+    return queued;
+  }
 
-    // Fall back to text content blocks if structuredContent is missing the text.
-    if (content == null && result && Array.isArray(result.content)) {
-      content = result.content
-        .filter((c) => c && c.type === 'text' && typeof c.text === 'string')
-        .map((c) => c.text)
-        .join('');
-    }
+  async _readThread(conn, threadId) {
+    const result = await conn.request('thread/read', { threadId, includeTurns: false });
+    const id = requireId(result?.thread?.id, 'NO_THREAD_ID_ON_RESUME', 'thread id on read');
+    if (id !== threadId) throw failure('THREAD_ID_DRIFT', `thread/read returned '${id}' instead of '${threadId}'.`);
+    const cwd = result.thread.cwd;
+    if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) throw failure('WORKING_DIR_UNKNOWN', `Thread '${threadId}' has no absolute cwd in App Server metadata.`);
+    return workingDir.normalize(cwd, this._cwd);
+  }
 
-    // Surface an explicit tool error first.
-    if (result && result.isError) {
-      const text =
-        (Array.isArray(result.content) &&
-          result.content.map((c) => c.text).filter(Boolean).join('\n')) ||
-        'unknown error';
-      const e = new Error(`Codex tool returned an error: ${text}`);
-      e.code = 'CODEX_TOOL_ERROR';
-      throw e;
-    }
+  getThreadWorkingDir(threadId, extra = {}) {
+    return this._serial((conn) => this._readThread(conn, threadId), extra.signal);
+  }
 
-    if (!threadId) {
-      if (mode === 'continue') {
-        // B1: do NOT borrow priorThreadId. A resume that doesn't echo a threadId is a lost/ambiguous
-        // session — fail loudly so bridge.js treats it as a resume failure, not a healthy turn.
-        const e = new Error(
-          `Codex codex-reply for thread '${priorThreadId}' returned no threadId — session is lost or ` +
-            `ambiguous. Refusing to assume the same thread (would be silent amnesia).`
-        );
-        e.code = 'NO_THREAD_ID_ON_RESUME';
-        throw e;
+  startSession(prompt, extra = {}) { return this._session(null, prompt, extra); }
+  continueSession(threadId, prompt, extra = {}) { return this._session(threadId, prompt, extra); }
+
+  _session(priorThreadId, prompt, extra) {
+    return this._serial(async (conn) => {
+      let cwd;
+      if (priorThreadId) {
+        cwd = await this._readThread(conn, priorThreadId);
+        if (extra.cwd && await workingDir.normalize(extra.cwd, this._cwd) !== cwd) {
+          throw failure('WORKING_DIR_MISMATCH', 'Saved bridge cwd differs from existing Codex thread metadata.');
+        }
+      } else cwd = await workingDir.normalize(extra.cwd || this._cwd, this._cwd);
+      const result = await conn.request(priorThreadId ? 'thread/resume' : 'thread/start', {
+        ...(priorThreadId ? { threadId: priorThreadId } : { ephemeral: false }),
+        cwd, approvalPolicy: 'never', sandbox: 'read-only',
+        ...(extra.model ? { model: extra.model } : {}),
+      });
+      const threadId = requireId(result?.thread?.id, priorThreadId ? 'NO_THREAD_ID_ON_RESUME' : 'NO_THREAD_ID', 'thread id');
+      if (priorThreadId && threadId !== priorThreadId) throw failure('THREAD_ID_DRIFT', 'thread/resume returned a different thread id.');
+      if (typeof result.cwd !== 'string' || !path.isAbsolute(result.cwd) || await workingDir.normalize(result.cwd, this._cwd) !== cwd) {
+        throw failure('WORKING_DIR_MISMATCH', 'App Server did not confirm the requested cwd.');
       }
-      // START only: a brand-new session with no echoed threadId can't be persisted.
-      const e = new Error('Codex response did not include a threadId — cannot persist session.');
-      e.code = 'NO_THREAD_ID';
-      throw e;
+      if (result.approvalPolicy !== 'never' || result.sandbox?.type !== 'readOnly' || result.sandbox.networkAccess === true) {
+        throw failure('BACKEND_POLICY_MISMATCH', 'App Server did not confirm read-only sandbox and approval never.');
+      }
+      return this._turn(conn, threadId, prompt, cwd);
+    }, extra.signal);
+  }
+
+  async _turn(conn, threadId, prompt, cwd) {
+    const ctx = { threadId, turnId: null, early: [], items: new Map(), terminal: null };
+    this._active = ctx;
+    let finish, fail;
+    const completed = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+    // Events/errors may arrive before the turn/start response.
+    completed.catch(() => {});
+    const acceptItem = (item) => {
+      if (item?.type !== 'agentMessage') return;
+      requireId(item.id, 'BACKEND_PROTOCOL_ERROR', 'agent message id');
+      if (typeof item.text !== 'string') throw failure('BACKEND_PROTOCOL_ERROR', 'Agent message has no text.');
+      const prior = ctx.items.get(item.id);
+      if (prior && (prior.text !== item.text || prior.phase !== item.phase)) throw failure('BACKEND_PROTOCOL_ERROR', 'Conflicting duplicate agent message.');
+      ctx.items.set(item.id, item);
+    };
+    const event = ({ method, params: p }) => {
+      if (!['turn/started', 'turn/completed', 'item/completed', 'item/agentMessage/delta', 'error'].includes(method)) return;
+      const eventTurnId = p?.turnId ?? p?.turn?.id;
+      if (conn.finishedTurns.has(JSON.stringify([p?.threadId, eventTurnId]))) return; // stale completed turn
+      if (p?.threadId !== threadId) throw failure('THREAD_ID_DRIFT', 'App Server event belongs to a different thread.');
+      requireId(eventTurnId, 'BACKEND_PROTOCOL_ERROR', 'event turn id');
+      if (!ctx.turnId) {
+        if (ctx.early.length >= 10000) throw failure('BACKEND_PROTOCOL_ERROR', 'Too many events before turn/start response.');
+        ctx.early.push({ method, params: p }); return;
+      }
+      if (eventTurnId !== ctx.turnId) throw failure('TURN_ID_DRIFT', 'App Server event belongs to an unexpected turn.');
+      if (ctx.terminal) return;
+      if (method === 'item/completed') acceptItem(p.item);
+      // Completed item text is authoritative. Repeated deltas must not corrupt reply bytes.
+      if (method === 'error' && p.willRetry !== true) throw failure('CODEX_TURN_FAILED', p.error?.message || 'Codex turn failed.');
+      if (method === 'turn/completed') {
+        const turn = p.turn;
+        if (turn.status !== 'completed') throw failure(turn.status === 'interrupted' ? 'CANCELLED' : 'CODEX_TURN_FAILED', turn.error?.message || `Codex turn ended with status '${turn.status}'.`);
+        if (!Array.isArray(turn.items)) throw failure('BACKEND_PROTOCOL_ERROR', 'Completed turn has no items array.');
+        for (const item of turn.items) acceptItem(item);
+        const messages = [...ctx.items.values()];
+        const finals = messages.filter((item) => item.phase === 'final_answer');
+        const content = (finals.length ? finals : messages.filter((item) => !item.phase)).map((item) => item.text).join('');
+        if (!content.trim()) throw failure('EMPTY_REPLY', 'Codex returned a completed turn without a final answer.');
+        ctx.terminal = turn;
+        conn.finishedTurns.add(JSON.stringify([threadId, ctx.turnId]));
+        finish({ threadId, content });
+      }
+    };
+    conn.onnotification = (message) => { try { event(message); } catch (err) { fail(err); } };
+    conn.onfailure = fail;
+    try {
+      const result = await conn.request('turn/start', {
+        threadId, input: [{ type: 'text', text: prompt }], cwd,
+        approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly', networkAccess: false },
+      });
+      ctx.turnId = requireId(result?.turn?.id, 'BACKEND_PROTOCOL_ERROR', 'turn id');
+      if (conn.finishedTurns.has(JSON.stringify([threadId, ctx.turnId]))) throw failure('TURN_ID_DRIFT', 'turn/start reused an already completed turn id.');
+      for (const message of ctx.early) event(message);
+      ctx.early = [];
+      return await completed;
+    } finally {
+      conn.onnotification = null;
+      conn.onfailure = null;
     }
-
-    if (typeof content !== 'string') content = content == null ? '' : String(content);
-
-    // M2: a non-error result with empty/whitespace-only content is silence-that-looks-like-an-answer
-    // on a fidelity-bearing channel. Reject it loudly rather than persisting a clean empty turn.
-    if (content.trim().length === 0) {
-      const e = new Error(
-        `Codex returned a successful result with empty content (thread '${threadId}', mode '${mode}'). ` +
-          `Treating empty-as-answer as a failure on a fidelity-bearing channel.`
-      );
-      e.code = 'EMPTY_REPLY';
-      throw e;
-    }
-
-    return { threadId: String(threadId), content };
-  }
-
-  // MAJOR-4: Serialise all callTool invocations through a promise-chain mutex. Codex CLI's
-  // mcp-server is not tested for concurrent calls from different conversations; this ensures only
-  // one callTool is in-flight at any time regardless of how many conversations are active.
-  _serialisedCallTool(client, req, opts) {
-    const tail = this._callMutexTail.then(() => client.callTool(req, undefined, opts));
-    // Keep the chain alive even if this call fails, so later calls are not blocked forever.
-    this._callMutexTail = tail.then(
-      () => {},
-      () => {}
-    );
-    return tail;
-  }
-
-  // Start a brand-new Codex session. Returns { threadId, content }.
-  async startSession(prompt, extra = {}) {
-    const client = await this._ensureConnected();
-    const result = await this._serialisedCallTool(
-      client,
-      {
-        name: 'codex',
-        arguments: {
-          prompt,
-          // Safe default: don't let an unattended team member do destructive shell ops.
-          // The orchestrator owns escalation (design §4.4 / §6 sandbox note).
-          'approval-policy': extra.approvalPolicy || 'never',
-          sandbox: extra.sandbox || 'read-only',
-          ...(extra.model ? { model: extra.model } : {}),
-          ...(extra.cwd ? { cwd: extra.cwd } : {}),
-          ...(extra.config ? { config: extra.config } : {}),
-        },
-      },
-      { timeout: this._callTimeoutMs }
-    );
-    return this._extractReply(result, { mode: 'start', priorThreadId: null });
-  }
-
-  // Continue an existing Codex session by threadId. Returns { threadId, content }.
-  // If Codex cannot resume the thread, callTool rejects / returns isError => caller hard-errors.
-  async continueSession(threadId, prompt) {
-    const client = await this._ensureConnected();
-    const result = await this._serialisedCallTool(
-      client,
-      { name: 'codex-reply', arguments: { threadId, prompt } },
-      { timeout: this._callTimeoutMs }
-    );
-    return this._extractReply(result, { mode: 'continue', priorThreadId: threadId });
   }
 
   async close() {
-    try {
-      if (this._client) await this._client.close();
-    } catch (e) {
-      log('error closing client:', e && e.message);
-    }
-    this._client = null;
-    this._transport = null;
+    this._closed = true;
+    if (this._transport) await this._transport.close();
+    await this._callMutexTail;
   }
 }
 
