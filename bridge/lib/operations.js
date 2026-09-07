@@ -5,6 +5,7 @@ const fsp = require('node:fs/promises');
 const crypto = require('node:crypto');
 const { isDeepStrictEqual } = require('node:util');
 const paths = require('./paths');
+const path = require('node:path');
 const store = require('./store');
 
 function failure(code, message) {
@@ -19,7 +20,8 @@ function assertRequestId(id) {
 
 function validState(state, id) {
   return state && state.conversation_id === id && typeof state.thread_id === 'string' &&
-    state.thread_id.length > 0 && Number.isInteger(state.turn) && state.turn > 0;
+    state.thread_id.length > 0 && Number.isInteger(state.turn) && state.turn > 0 &&
+    (state.working_dir === undefined || (typeof state.working_dir === 'string' && path.isAbsolute(state.working_dir)));
 }
 
 async function load(conversationId) {
@@ -42,6 +44,9 @@ async function load(conversationId) {
           typeof op.created_at !== 'string' || typeof op.input?.message !== 'string' || !op.input.message ||
           typeof op.input.provider !== 'string' || !op.input.provider ||
           !(op.input.working_dir === null || typeof op.input.working_dir === 'string') ||
+          !(op.input.working_dir_policy === undefined || (op.input.working_dir_policy === 'pinned' &&
+            typeof op.input.working_dir === 'string' && path.isAbsolute(op.input.working_dir))) ||
+          (op.input.working_dir_policy === 'pinned' && op.before && op.before.working_dir !== op.input.working_dir) ||
           !(op.before === null || validState(op.before, conversationId)) ||
           (i > 0 && !isDeepStrictEqual(op.before, journal.operations[i - 1].after))) {
         throw new Error('invalid operation or discontinuous history');
@@ -57,6 +62,7 @@ async function load(conversationId) {
             op.after.turn !== (op.before?.turn || 0) + 1 ||
             (op.before && op.result.thread_id !== op.before.thread_id) ||
             op.after.last_operation_id !== op.operation_id || op.after.journal_version !== 1 ||
+            (op.input.working_dir_policy === 'pinned' && op.after.working_dir !== op.input.working_dir) ||
             typeof op.received_at !== 'string') throw new Error('invalid recorded result');
       }
     }
@@ -134,6 +140,7 @@ async function receive(conversationId, journal, result) {
     conversation_id: conversationId, thread_id: result.thread_id, turn: result.turn,
     provider: op.input.provider, created_at: op.before?.created_at || ts, updated_at: ts,
     journal_version: 1, last_operation_id: op.operation_id,
+    ...(op.input.working_dir_policy === 'pinned' ? { working_dir: op.input.working_dir } : {}),
   };
   await save(conversationId, journal);
 }

@@ -56,6 +56,15 @@ Zkontroluj prosím následující diff a ukaž na případné chyby…
 
 `CONV_ID` je tvůj stabilní klíč pro celou konverzaci — zvol ho jednou a opakovaně ho používej v každé zprávě. Bridge udržuje Codex vlákno živé na disku pod tímto klíčem, takže každé čerstvě spuštěné `codex-peer` pokračuje přesně tam, kde skončilo poslední.
 
+Pro kontrolu souborů projektu přidej adresář na **stejný první řádek**:
+
+```text
+CONV_ID: my-project--review-02; WORKING_DIR: "C:/Projects/My App"
+Zkontroluj zdrojové soubory tohoto projektu.
+```
+
+Cesta je JSON řetězec; `/` usnadňuje zápis Windows cest bez escapování zpětných lomítek. Metadata jsou pouze na prvním řádku, tělo se předává beze změn. Bridge ověří adresář a uloží jeho kanonickou cestu k vláknu. V dalších zprávách ji můžeš vynechat; jiný adresář bude odmítnut. Bez explicitní cesty v prvním tahu se použije adresář procesu bridge zachycený při jeho startu. Vůči němu se vyhodnocují i relativní cesty, proto preferuj absolutní cestu projektu. Starší vlákna bez uloženého adresáře čekají na ověření; viz [diagnostika adresáře](docs/runbook.md#pracovní-adresář-a-starší-vlákna).
+
 ### V Claude Code týmu
 
 ```python

@@ -56,6 +56,15 @@ Please review the following diff and point out any bugs…
 
 The `CONV_ID` is your stable key for the whole conversation — pick it once and reuse it on every message. The bridge keeps Codex's thread alive on disk under that key, so each fresh `codex-peer` spawn picks up right where the last one left off.
 
+To review files in a project, add its directory on the **same first line**:
+
+```text
+CONV_ID: my-project--review-02; WORKING_DIR: "C:/Projects/My App"
+Review the source files in this project.
+```
+
+The path is a JSON string; `/` avoids escaping Windows backslashes. Only the first line contains metadata; the body is passed unchanged. The bridge validates the directory and stores its canonical path with the thread. Later messages may omit it; a different directory is rejected. Without an explicit first-turn path, the default is the bridge process's launch directory, captured when the bridge starts. Relative paths resolve against that same directory, so prefer absolute project paths. Old threads without a saved directory are blocked pending verification; see [directory diagnostics](docs/runbook.en.md#working-directory-and-legacy-threads).
+
 ### In a Claude Code team
 
 ```python

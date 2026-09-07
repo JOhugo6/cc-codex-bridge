@@ -189,13 +189,24 @@ test('working_dir: tool schema lists working_dir as optional and a turn with it 
     arguments: {
       conversation_id: 'mcp-wdir-1',
       message: 'hello with working_dir',
-      working_dir: '/tmp/my-project',
+      working_dir: dir,
     },
   });
   assert.notEqual(res.isError, true, 'turn with working_dir must not be an error');
   assert.ok(res.structuredContent, 'has structuredContent');
   assert.equal(res.structuredContent.turn, 1);
   assert.ok(res.structuredContent.thread_id);
+
+  const mismatch = await client.callTool({ name: 'codex_turn', arguments: {
+    conversation_id: 'mcp-wdir-1', message: 'wrong project', working_dir: process.cwd(),
+  } });
+  assert.equal(mismatch.isError, true);
+  assert.match(mismatch.content[0].text, /WORKING_DIR_MISMATCH/);
+  const invalid = await client.callTool({ name: 'codex_turn', arguments: {
+    conversation_id: 'mcp-wdir-invalid', message: 'invalid project', working_dir: path.join(dir, 'missing'),
+  } });
+  assert.equal(invalid.isError, true);
+  assert.match(invalid.content[0].text, /INVALID_WORKING_DIR/);
 
   // 3. A turn WITHOUT working_dir also succeeds (it is optional).
   const res2 = await client.callTool({

@@ -350,11 +350,11 @@ test('working_dir is passed as extra.cwd to backend.startSession on first turn',
   const backend = new FakeBackend();
   const bridge = new CodexBridge(backend);
 
-  await bridge.turn('conv-wdir', 'hello', { working_dir: '/my/project' });
+  await bridge.turn('conv-wdir', 'hello', { working_dir: env.dir });
 
   assert.equal(backend.calls.length, 1);
   assert.equal(backend.calls[0].kind, 'start');
-  assert.deepEqual(backend.calls[0].extra, { cwd: '/my/project' });
+  assert.deepEqual(backend.calls[0].extra, { cwd: await fsp.realpath(env.dir) });
 });
 
 test('working_dir is NOT forwarded on subsequent turns (cwd is set at session start only)', async (t) => {
@@ -364,16 +364,16 @@ test('working_dir is NOT forwarded on subsequent turns (cwd is set at session st
   const backend = new FakeBackend();
   const bridge = new CodexBridge(backend);
 
-  await bridge.turn('conv-wdir2', 'first', { working_dir: '/my/project' });
+  await bridge.turn('conv-wdir2', 'first', { working_dir: env.dir });
   // Second turn: bridge calls continueSession, not startSession — working_dir is not passed.
-  await bridge.turn('conv-wdir2', 'second', { working_dir: '/my/project' });
+  await bridge.turn('conv-wdir2', 'second', { working_dir: env.dir });
 
   assert.equal(backend.calls[1].kind, 'reply');
   // continueSession does not have an extra param — just threadId + prompt.
   assert.ok(!backend.calls[1].extra, 'continueSession must not receive extra');
 });
 
-test('turn without working_dir uses empty extra (no cwd injected)', async (t) => {
+test('turn without working_dir explicitly passes the canonical launch cwd', async (t) => {
   const env = freshStateDir();
   t.after(() => env.cleanup());
 
@@ -383,7 +383,7 @@ test('turn without working_dir uses empty extra (no cwd injected)', async (t) =>
   await bridge.turn('conv-no-wdir', 'hello');
 
   assert.equal(backend.calls[0].kind, 'start');
-  assert.deepEqual(backend.calls[0].extra, {}, 'extra must be empty when working_dir is omitted');
+  assert.deepEqual(backend.calls[0].extra, { cwd: await fsp.realpath(process.cwd()) });
 });
 
 // ---------------------------------------------------------------------------

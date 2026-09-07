@@ -65,7 +65,7 @@ test('missing or mismatched original identity blocks backend calls and writes', 
 test('legacy session is blocked until explicit migration, which preserves transcript and thread', async (t) => {
   const env = freshStateDir();
   t.after(() => env.cleanup());
-  const legacy = await legacyFixture(env.dir, 'Review-A');
+  const legacy = await legacyFixture(env.dir, 'Review-A', { thread_id: 'legacy-thread', turn: 4, working_dir: await fsp.realpath(env.dir) });
   const other = await legacyFixture(env.dir, 'unrelated');
   const backend = new FakeBackend();
   const bridge = new CodexBridge(backend);
@@ -132,7 +132,7 @@ test('case-sensitive legacy directory containing two case aliases is rejected be
 test('interrupted migration blocks turns and can safely resume its exact snapshot', async (t) => {
   const env = freshStateDir();
   t.after(() => env.cleanup());
-  await legacyFixture(env.dir, 'retry');
+  await legacyFixture(env.dir, 'retry', { thread_id: 'legacy-thread', turn: 4, working_dir: await fsp.realpath(env.dir) });
   const copy = t.mock.method(fsp, 'copyFile', async () => { throw new Error('injected copy failure'); });
   await assert.rejects(migrateLegacy('retry'), /injected copy failure/);
   copy.mock.restore();

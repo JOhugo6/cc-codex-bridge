@@ -8,6 +8,7 @@ const lock = require('./lock');
 const store = require('./store');
 const paths = require('./paths');
 const operations = require('./operations');
+const workingDir = require('./working-dir');
 const fsp = require('node:fs/promises');
 
 // Read the owner metadata from a lock dir (mirrors lock.js#readLockMeta without re-exporting it).
@@ -35,18 +36,17 @@ class CodexBridge {
     this.backend = backend;
     this.provider = opts.provider || 'codex';
     this.lockOpts = opts.lockOpts || {};
+    // Capture once: later chdir calls cannot change the default or relative-path base.
+    this.defaultWorkingDir = process.cwd();
   }
 
   // Deterministic single turn. Throws LOUDLY on any failure to create/resume a session — never
   // silently starts fresh (design §4.1 step 4, §2).
-  // opts.working_dir — passed as extra.cwd to backend.startSession() on the first turn only.
-  // Falls back to process.cwd() (the existing default in the backend) when not provided.
+  // New sessions pin a validated canonical cwd. Resumes inherit it and reject changes.
   async turn(conversationId, message, opts = {}) {
     paths.assertSafeConversationId(conversationId);
     operations.assertRequestId(opts.request_id);
-    if (opts.working_dir != null && typeof opts.working_dir !== 'string') {
-      throw Object.assign(new Error('working_dir must be a string when provided.'), { code: 'INVALID_WORKING_DIR' });
-    }
+    workingDir.assertInput(opts.working_dir);
     if (typeof message !== 'string' || message.length === 0) {
       const e = new Error('message must be a non-empty string');
       e.code = 'INVALID_MESSAGE';
@@ -95,10 +95,20 @@ class CodexBridge {
           throw Object.assign(new Error('Transcript exists without state or operations journal. Preserve it and recover the original thread before continuing.'), { code: 'OPERATION_UNCERTAIN' });
         }
       }
-      const input = { message, working_dir: opts.working_dir ?? null, provider: this.provider };
-      const replay = operations.findReplay(journal, opts.request_id, input);
-      if (replay) return replay;
+      const recorded = opts.request_id === undefined ? null : journal?.operations.find((op) => op.request_id === opts.request_id);
+      if (recorded) {
+        // Old journals retain their exact raw-input replay contract. New requests compare
+        // effective paths, so omission and equivalent spellings identify the same request.
+        const replayInput = recorded.input.working_dir_policy === 'pinned'
+          ? { message, provider: this.provider, working_dir_policy: 'pinned', working_dir: opts.working_dir === undefined
+            ? recorded.input.working_dir : await workingDir.normalize(opts.working_dir, this.defaultWorkingDir) }
+          : { message, provider: this.provider, working_dir: opts.working_dir ?? null };
+        const replay = operations.findReplay(journal, opts.request_id, replayInput);
+        if (replay) return replay;
+      }
       operations.assertComplete(journal, conversationId);
+      const cwd = await workingDir.forTurn(prior, opts.working_dir, this.defaultWorkingDir);
+      const input = { message, working_dir: cwd, working_dir_policy: 'pinned', provider: this.provider };
       const isNew = !prior || !prior.thread_id;
       const turnNumber = (prior && Number.isInteger(prior.turn) ? prior.turn : 0) + 1;
 
@@ -113,9 +123,7 @@ class CodexBridge {
         if (lockMeta && lockMeta.token) startHeartbeat(lockMeta.token);
 
         if (isNew) {
-          // Pass working_dir as extra.cwd so Codex can read project files directly.
-          const extra = opts.working_dir ? { cwd: opts.working_dir } : {};
-          result = await this.backend.startSession(message, extra);
+          result = await this.backend.startSession(message, { cwd });
         } else {
           result = await this.backend.continueSession(prior.thread_id, message);
         }

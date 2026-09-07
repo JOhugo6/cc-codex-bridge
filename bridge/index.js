@@ -100,17 +100,16 @@ async function main() {
         request_id: z
           .string().min(1).max(200).regex(/^[A-Za-z0-9._-]+$/).optional()
           .describe('Optional unique ID for this request within the conversation. Reuse with identical input to retrieve its completed result without another Codex call.'),
-        // working_dir: optional project path so Codex can read files directly without needing
-        // file contents pasted in. Set to the project root on the first turn; ignored on resume
-        // (cwd is set at session start and cannot change mid-thread).
+        // A real directory is canonicalized and pinned on the first turn.
         working_dir: z
           .string()
+          .min(1)
           .max(500)
           .optional()
           .describe(
-            'Optional working directory for Codex. Set to the project path so Codex can read ' +
-              'files directly without needing file contents pasted in. Only used on the first turn ' +
-              '(session start); ignored on subsequent turns of the same conversation.'
+            'Existing project directory for Codex, normalized and pinned on the first turn. ' +
+              'Defaults to bridge launch cwd; relative paths resolve there. Later turns inherit the pinned ' +
+              'directory; an explicitly different directory is rejected. Prefer an absolute project path.'
           ),
       },
       outputSchema: {

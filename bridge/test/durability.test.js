@@ -33,13 +33,14 @@ test('request_id is scoped by exact conversation, rejects changed message/cwd/pr
   const env = freshStateDir(); t.after(() => env.cleanup());
   const backend = new FakeBackend();
   const bridge = new CodexBridge(backend);
-  const opts = { request_id: 'Case-A', working_dir: '/project' };
+  const opts = { request_id: 'Case-A', working_dir: env.dir };
   const results = await Promise.all([bridge.turn('requests', 'hello', opts), bridge.turn('requests', 'hello', opts)]);
   assert.deepEqual(results[0], results[1]);
   assert.equal(backend.calls.length, 1);
-  for (const [message, changed] of [['other', opts], ['hello', { ...opts, working_dir: '/other' }], ['hello', { request_id: opts.request_id }]]) {
+  for (const [message, changed] of [['other', opts], ['hello', { ...opts, working_dir: process.cwd() }]]) {
     await assert.rejects(bridge.turn('requests', message, changed), { code: 'REQUEST_ID_CONFLICT' });
   }
+  assert.deepEqual(await bridge.turn('requests', 'hello', { request_id: opts.request_id }), results[0]);
   await assert.rejects(new CodexBridge(backend, { provider: 'other' }).turn('requests', 'hello', opts), { code: 'REQUEST_ID_CONFLICT' });
   await bridge.turn('requests', 'hello', { ...opts, request_id: 'case-a' });
   await bridge.turn('Requests', 'hello', opts);

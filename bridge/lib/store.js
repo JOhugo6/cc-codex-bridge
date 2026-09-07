@@ -35,6 +35,9 @@ async function readStateFile(file, conversationId, { legacy = false } = {}) {
     if (!Number.isInteger(st.turn) || st.turn < 1) {
       throw new Error(`turn must be a positive integer (>=1), got ${JSON.stringify(st.turn)}`);
     }
+    if (st.working_dir !== undefined && (typeof st.working_dir !== 'string' || !path.isAbsolute(st.working_dir) || st.working_dir.includes('\0'))) {
+      throw new Error('working_dir must be an absolute directory path when present');
+    }
     if ((!legacy || st.conversation_id !== undefined) && st.conversation_id !== conversationId) {
       const err = new Error(`Stored conversation_id ${JSON.stringify(st.conversation_id)} does not match ${JSON.stringify(conversationId)} at ${file}.`);
       err.code = 'STATE_IDENTITY_MISMATCH';
