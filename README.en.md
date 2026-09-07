@@ -93,6 +93,7 @@ npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" run smoke
 ## Key design decisions
 
 - **Thread continuity on disk, not in the LLM.** The relay agent holds no state. The bridge persists `thread_id` to `~/.claude/state/codex-bridge/v2@<sha256>.json` so it survives agent re-instantiation and context compaction.
+- **Safe request redelivery.** Optional `request_id` in `codex_turn` retrieves an already completed result without another Codex call. A durable journal blocks progress after an ambiguous failure; the [runbook](docs/runbook.en.md#request-redelivery-and-operation-recovery) explains diagnosis and recovery of local writes.
 - **Hard-error on lost session.** A failed resume throws loudly — never silently starts a fresh session (which would be invisible amnesia).
 - **`model: sonnet` for the relay.** Haiku was unreliable about calling the tool vs. improvising its own answer. Sonnet follows the tool-call instruction reliably.
 - **`CONV_ID:` is operator-supplied.** The relay never derives the key — an LLM-guessed key would be non-deterministic and break cross-spawn continuity.

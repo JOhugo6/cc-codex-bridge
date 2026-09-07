@@ -51,6 +51,25 @@ Opakování dokončené migrace nic nepřepíše. Přerušenou migraci lze zopak
 
 ---
 
+### Opakované doručení a obnova operace
+
+Přímý volající `codex_turn` může předat volitelné `request_id` (1–200 písmen, číslic, `.`, `_`, `-`). Pro každý zamýšlený tah zvol nové ID; stejné použij pouze při opakovaném doručení téhož požadavku. ID rozlišuje velikost písmen a platí v rámci přesného `conversation_id`. Stejné ID s jinou zprávou, předaným `working_dir` (včetně rozdílu mezi vynecháním a předáním) nebo providerem vrátí `REQUEST_ID_CONFLICT`. Dokončený požadavek vrátí původní `{reply, thread_id, turn}` včetně whitespace, i po restartu procesu nebo dalších tazích; neopakuje backendové volání ani nemění stav. Volání bez `request_id` zachovávají původní rozhraní: každé úspěšné volání je nový tah, takže ztrátu odpovědi po úspěšném dokončení nelze deduplikovat. Níže popsaná obálka relay agenta zatím `request_id` nepředává.
+
+Journal `v2@<sha256>.operations.json` se zapisuje před vstupním transcriptem i backendovým voláním. Poslední operace prochází stavy `pending` → `received` → `completed`. `received` obsahuje přesnou odpověď a cílový stav; `completed` se uloží až po dokončení zápisu stavu i transcriptu. Timeout nebo chyba transportu mohou nastat až po provedení vzdálené operace, proto zůstává stav `pending`. Následující volání skončí chybou `OPERATION_UNCERTAIN` nebo `OPERATION_INCOMPLETE` před kontaktováním Codexu. Jiné request ID tuto blokaci neobchází. Chybějící či poškozený journal nebo rozpor se stavem rovněž blokují pokračování.
+
+Pro diagnostiku a obnovu zastav bridge instance, zazálohuj **celý** stavový adresář a případně nastav stejné `CODEX_BRIDGE_STATE_DIR` jako bridge. Z adresáře instalovaného bridge spusť:
+
+```powershell
+node recover-operation.js inspect 'Review-A'
+node recover-operation.js finish 'Review-A'
+```
+
+`inspect` vypíše stav, journal a cesty, včetně vstupu požadavku a zaznamenané odpovědi. `finish` získá zámek konverzace a dokončí pouze lokální zápisy operace `received`. Ověří očekávaný předchozí/cílový stav, neduplikuje existující řádky transcriptu a vrátí původní výsledek. Opakované spuštění je bezpečné; Codex nespouští. Po `finish` můžeš znovu doručit stejné `request_id` a získat výsledek, nebo pokračovat novým požadavkem. Bez `request_id` použij výsledek vypsaný `finish` jako dokončený tah; opakované odeslání zprávy už bude nový tah. Po pádu procesu může stávající pravidlo pro osiřelý zámek zpozdit obnovu až o 15 minut; nemaž zámek živého procesu.
+
+Operace `pending` **nemá zaznamenanou autoritativní odpověď**. `finish` ji odmítne: backend ji mohl provést, i když neexistuje stav nebo výstupní transcript. Zachovej journal a historii backendu pro vyšetření a ověřenou rekonstrukci operátorem; tento příkaz nedokáže nejistotu rozhodnout ani bezpečně zopakovat prompt. Automatické resetování či zapomenutí operace není podporováno. Nemaž stav, neměň conversation ID ani neobnovuj starší snapshot jen kvůli odstranění chyby. Při poškozeném stavu či neúplném/konfliktním transcriptu zachovej poškozené soubory a obnov pouze data ověřená vůči zaznamenané operaci (nebo konzistentní záloze), pak opakuj `finish`. Odpověď v journalu umožňuje rekonstruovat řádek transcriptu dané operace, nikoli historii před zavedením journalu.
+
+Záruky pokrývají pád a restart procesu bridge při zachování souborů a dodržování zámku všemi zapisujícími procesy. Zápisy journalu/stavu flushují obsah souboru před atomickým přejmenováním; POSIX flushuje i adresářový záznam. Na Windows zde není přenositelný flush adresáře, proto mají náhlý výpadek napájení a selhání filesystemu/hardware slabší záruky. Udržuj zálohy. Journal zachovává všechny požadavky a výsledky kvůli starším request ID; roste s historií a přepisuje se při přechodech stavu. Neprořezávej jej odděleně od stavu/transcriptů a nevracej se ke starší verzi bridge, která journal ignoruje.
+
 ## 2. Použití `codex-peer` v týmu
 
 ### Co to je

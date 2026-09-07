@@ -51,6 +51,25 @@ Repeating a completed migration changes nothing. An interrupted migration can be
 
 ---
 
+### Request redelivery and operation recovery
+
+Direct `codex_turn` callers may pass an optional `request_id` (1–200 letters, digits, `.`, `_`, `-`). Choose a new ID for each intended turn, and reuse it only when redelivering that same request. IDs are case-sensitive and scoped to the exact `conversation_id`. Reusing an ID with a different message, supplied `working_dir` (including omitted versus supplied), or provider returns `REQUEST_ID_CONFLICT`. A completed request returns the original `{reply, thread_id, turn}`, including whitespace, even after process restart or later turns; replay changes no state and calls no backend. Calls without `request_id` keep the existing interface: each successful call is a new turn, so a response lost after successful completion cannot be deduplicated. The relay envelope described below does not yet expose `request_id`.
+
+The `v2@<sha256>.operations.json` journal is written before the inbound transcript or backend call. Its last operation moves through `pending` → `received` → `completed`. `received` contains the exact response and intended state; `completed` is saved only after state and transcript writes finish. A timeout or transport error may follow a remote side effect, so it leaves the operation `pending`. Subsequent calls fail with `OPERATION_UNCERTAIN` or `OPERATION_INCOMPLETE` before contacting Codex. A different request ID does not bypass this block. Missing/corrupt journals or state that disagrees with the journal also fail closed.
+
+For diagnosis and recovery, stop bridge instances, back up the **entire** state directory, and set the same `CODEX_BRIDGE_STATE_DIR` if using a custom location. Run these commands from the installed bridge directory:
+
+```powershell
+node recover-operation.js inspect 'Review-A'
+node recover-operation.js finish 'Review-A'
+```
+
+`inspect` prints the state, journal and paths, including request input and any recorded response. `finish` acquires the conversation lock and completes only local writes for a `received` operation. It checks the expected previous/next state, does not duplicate existing transcript entries, and returns the original result. Repeating it is safe; it never starts Codex. After `finish`, redeliver the same `request_id` to retrieve that result, or continue with a new request. Without `request_id`, take the result printed by `finish` as the completed turn; resending its message would be another turn. Following a process crash, the existing stale-lock policy can delay recovery for up to 15 minutes; do not remove a live process's lock.
+
+A `pending` operation has **no recorded authoritative response**. `finish` refuses it: the backend may have executed even if no state or output transcript exists. Preserve the journal and backend history for investigation and reconciliation by the operator; this command cannot resolve that uncertainty or safely resend the prompt. There is deliberately no automatic reset/forget option. Do not delete state, change the conversation ID, or restore an older snapshot merely to make the error disappear. For corrupt state or a torn/conflicting transcript, preserve the damaged files and restore only data verified against the recorded operation (or a consistent backup) before running `finish` again. A journal response can support reconstruction of that operation's transcript entry; it cannot reconstruct history predating the journal.
+
+These guarantees cover bridge process crashes and restart while its files are preserved and cooperating processes use the conversation lock. Journal/state writes flush file contents before atomic rename; POSIX also flushes the directory entry. Windows provides no portable directory flush here, so abrupt power loss and filesystem/hardware failure have weaker guarantees. Keep backups. The journal retains all requests and results to support old request IDs; it grows with history and is rewritten per transition. Do not prune it independently of state/transcripts, and do not downgrade to an older bridge that ignores the journal.
+
 ## 2. Using `codex-peer` in a team
 
 ### What it is

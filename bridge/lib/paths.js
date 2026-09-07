@@ -6,6 +6,7 @@
 //   <stateDir>/
 //     v2@<sha256(exact conversation_id)>.json              state including original conversation_id
 //     v2@<sha256(exact conversation_id)>.transcript.jsonl  transcript
+//     v2@<sha256(exact conversation_id)>.operations.json   durable requests and responses
 //     v2@<sha256(exact conversation_id)>.lock              advisory file lock (mkdir-based)
 // '@' cannot occur in a legacy id, keeping the two namespaces disjoint.
 //
@@ -65,6 +66,10 @@ function transcriptFile(id) {
   return path.join(stateDir(), `${identityKey(id)}.transcript.jsonl`);
 }
 
+function operationsFile(id) {
+  return path.join(stateDir(), `${identityKey(id)}.operations.json`);
+}
+
 function lockDir(id) {
   // mkdir-based lock => the lock is a directory, atomic across processes on Windows + POSIX.
   return path.join(stateDir(), `${identityKey(id)}.lock`);
@@ -77,6 +82,7 @@ module.exports = {
   identityKey,
   stateFile,
   transcriptFile,
+  operationsFile,
   lockDir,
   SAFE_ID,
 };

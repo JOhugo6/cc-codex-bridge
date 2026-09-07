@@ -93,6 +93,7 @@ npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" run smoke
 ## Klíčová designová rozhodnutí
 
 - **Kontinuita vlákna na disku, ne v LLM.** Relay agent nedrží žádný stav. Bridge persistuje `thread_id` do `~/.claude/state/codex-bridge/v2@<sha256>.json`, takže přežije re-instanciaci agenta a context compaction.
+- **Bezpečné opakování požadavku.** Volitelné `request_id` v `codex_turn` vrátí již dokončený výsledek bez nového volání Codexu. Trvalý journal blokuje pokračování po nejasném selhání; [runbook](docs/runbook.md#opakované-doručení-a-obnova-operace) popisuje diagnostiku a obnovu lokálních zápisů.
 - **Hard-error při ztrátě session.** Selhání obnovy vlákna vyhodí hlasitou chybu — nikdy tiše nezahájí novou session (to by byla neviditelná amnézie).
 - **`model: sonnet` pro relay.** Haiku byl nespolehlivý ohledně volání nástroje vs. improvizace vlastní odpovědi. Sonnet spolehlivě následuje instrukce pro tool call.
 - **`CONV_ID:` dodává operátor.** Relay klíč nikdy neodvozuje — LLM-hádaný klíč by byl nedeterministický a zlomil by cross-spawn kontinuitu.

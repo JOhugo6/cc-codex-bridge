@@ -1,12 +1,13 @@
 'use strict';
-// The deterministic core (design §4.1). NO LLM. Ties together: lock -> load state -> call backend
-// (start or continue) -> append transcript -> save state -> unlock -> return {reply, thread_id, turn}.
+// The deterministic core: lock -> verify state/journal -> persist intent -> call backend ->
+// persist response -> commit state/transcript -> mark completed -> unlock -> return result.
 //
 // The backend is injected so this is fully unit-testable without spawning real Codex.
 
 const lock = require('./lock');
 const store = require('./store');
 const paths = require('./paths');
+const operations = require('./operations');
 const fsp = require('node:fs/promises');
 
 // Read the owner metadata from a lock dir (mirrors lock.js#readLockMeta without re-exporting it).
@@ -42,6 +43,10 @@ class CodexBridge {
   // Falls back to process.cwd() (the existing default in the backend) when not provided.
   async turn(conversationId, message, opts = {}) {
     paths.assertSafeConversationId(conversationId);
+    operations.assertRequestId(opts.request_id);
+    if (opts.working_dir != null && typeof opts.working_dir !== 'string') {
+      throw Object.assign(new Error('working_dir must be a string when provided.'), { code: 'INVALID_WORKING_DIR' });
+    }
     if (typeof message !== 'string' || message.length === 0) {
       const e = new Error('message must be a non-empty string');
       e.code = 'INVALID_MESSAGE';
@@ -79,18 +84,27 @@ class CodexBridge {
     };
     try {
       const prior = await store.loadState(conversationId); // throws on corrupt state
+      let journal = await operations.load(conversationId);
+      operations.assertState(journal, prior);
+      if (!prior && !journal) {
+        const transcript = await fsp.stat(paths.transcriptFile(conversationId)).catch((err) => {
+          if (err.code === 'ENOENT') return null;
+          throw err;
+        });
+        if (transcript?.size) {
+          throw Object.assign(new Error('Transcript exists without state or operations journal. Preserve it and recover the original thread before continuing.'), { code: 'OPERATION_UNCERTAIN' });
+        }
+      }
+      const input = { message, working_dir: opts.working_dir ?? null, provider: this.provider };
+      const replay = operations.findReplay(journal, opts.request_id, input);
+      if (replay) return replay;
+      operations.assertComplete(journal, conversationId);
       const isNew = !prior || !prior.thread_id;
       const turnNumber = (prior && Number.isInteger(prior.turn) ? prior.turn : 0) + 1;
 
-      // Record the inbound message first, so a crash mid-turn still leaves an audit trail.
-      await store.appendTranscript(conversationId, {
-        ts: nowIso(),
-        direction: 'in',
-        turn: turnNumber,
-        thread_id: prior ? prior.thread_id || null : null,
-        message,
-        provider: this.provider,
-      });
+      journal = await operations.begin(conversationId, journal, prior, input, opts.request_id);
+      const operation = journal.operations.at(-1);
+      await store.ensureTranscriptEntry(conversationId, operations.transcriptEntry(operation, 'in'));
 
       let result;
       try {
@@ -110,31 +124,34 @@ class CodexBridge {
         await store.appendTranscript(conversationId, {
           ts: nowIso(),
           direction: 'error',
+          operation_id: operation.operation_id,
+          request_id: operation.request_id,
           turn: turnNumber,
           thread_id: prior ? prior.thread_id || null : null,
           error: err && err.message,
           code: err && err.code,
           provider: this.provider,
-        });
+        }).catch(() => {}); // The durable pending operation still blocks unsafe retries.
         const wrapped = new Error(
           (isNew
             ? `Failed to START Codex session for conversation '${conversationId}': `
             : `Failed to RESUME Codex session '${prior.thread_id}' for conversation '${conversationId}': `) +
             (err && err.message ? err.message : String(err)) +
-            '. Refusing to silently start a fresh session (would be silent amnesia).'
+            '. Refusing to silently start a fresh session (would be silent amnesia). ' +
+            'Operation remains uncertain; inspect it with recover-operation.js before continuing.'
         );
         wrapped.code = err && err.code ? err.code : 'CODEX_CALL_FAILED';
         wrapped.cause = err;
         throw wrapped;
       }
 
-      const threadId = result.threadId;
-      const reply = typeof result.content === 'string' ? result.content : String(result.content);
+      const threadId = result && result.threadId;
+      const reply = typeof result?.content === 'string' ? result.content : String(result?.content);
 
       // MINOR-13: wrap post-call validation so any validation error also gets an 'error' transcript
       // entry before being rethrown — same pattern as the backend-call failure path above.
       try {
-        if (!threadId) {
+        if (typeof threadId !== 'string' || !threadId) {
           const e = new Error('Codex did not return a thread_id; cannot guarantee session continuity.');
           e.code = 'NO_THREAD_ID';
           throw e;
@@ -152,36 +169,27 @@ class CodexBridge {
         await store.appendTranscript(conversationId, {
           ts: nowIso(),
           direction: 'error',
+          operation_id: operation.operation_id,
+          request_id: operation.request_id,
           turn: turnNumber,
           thread_id: prior ? prior.thread_id || null : null,
           error: validationErr && validationErr.message,
           code: validationErr && validationErr.code,
           provider: this.provider,
-        });
+        }).catch(() => {});
         throw validationErr;
       }
 
-      const newState = {
-        ...(prior && prior.legacy_migration ? { legacy_migration: prior.legacy_migration } : {}),
-        conversation_id: conversationId,
-        thread_id: threadId,
-        turn: turnNumber,
-        provider: this.provider,
-        created_at: prior && prior.created_at ? prior.created_at : nowIso(),
-        updated_at: nowIso(),
-      };
-      await store.saveState(conversationId, newState);
-
-      await store.appendTranscript(conversationId, {
-        ts: nowIso(),
-        direction: 'out',
-        turn: turnNumber,
-        thread_id: threadId,
-        message: reply,
-        provider: this.provider,
-      });
-
-      return { reply, thread_id: threadId, turn: turnNumber };
+      try {
+        await operations.receive(conversationId, journal, { reply, thread_id: threadId, turn: turnNumber });
+        return await operations.finish(conversationId, journal, prior);
+      } catch (cause) {
+        const err = new Error(`Codex answered but local persistence failed for '${conversationId}': ${cause.message}. ` +
+          'Do not repeat the backend call. Run recover-operation.js inspect and finish to recover a recorded response.');
+        err.code = 'OPERATION_PERSISTENCE_FAILED';
+        err.cause = cause;
+        throw err;
+      }
     } finally {
       stopHeartbeat();
       await release();

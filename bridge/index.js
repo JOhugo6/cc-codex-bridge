@@ -97,6 +97,9 @@ async function main() {
           .min(1)
           .max(100000)
           .describe('The message to send to Codex this turn.'),
+        request_id: z
+          .string().min(1).max(200).regex(/^[A-Za-z0-9._-]+$/).optional()
+          .describe('Optional unique ID for this request within the conversation. Reuse with identical input to retrieve its completed result without another Codex call.'),
         // working_dir: optional project path so Codex can read files directly without needing
         // file contents pasted in. Set to the project root on the first turn; ignored on resume
         // (cwd is set at session start and cannot change mid-thread).
@@ -116,9 +119,9 @@ async function main() {
         turn: z.number().int().describe('1-based turn number within this conversation.'),
       },
     },
-    async ({ conversation_id, message, working_dir }) => {
+    async ({ conversation_id, message, working_dir, request_id }) => {
       try {
-        const out = await bridge.turn(conversation_id, message, { working_dir });
+        const out = await bridge.turn(conversation_id, message, { working_dir, request_id });
         return {
           // structuredContent is the fidelity-bearing channel (design §2: fidelity from tool
           // result, not relay prose). Also mirror to a text block for clients that ignore it.

@@ -54,6 +54,7 @@ test('codex_turn tool is listed with the correct input/output schema', async (t)
   const props = tool.inputSchema.properties;
   assert.ok(props.conversation_id, 'has conversation_id');
   assert.ok(props.message, 'has message');
+  assert.ok(props.request_id, 'has optional request_id');
   assert.deepEqual(
     [...tool.inputSchema.required].sort(),
     ['conversation_id', 'message'],
@@ -63,6 +64,28 @@ test('codex_turn tool is listed with the correct input/output schema', async (t)
   assert.ok(tool.outputSchema, 'has outputSchema');
   const out = tool.outputSchema.properties;
   assert.ok(out.reply && out.thread_id && out.turn, 'output has reply, thread_id, turn');
+});
+
+test('request_id replay survives MCP server restart and conflicts return tool errors', async (t) => {
+  const dir = freshDir();
+  let connection = await startClient({ stateDir: dir });
+  t.after(async () => {
+    await connection.client.close();
+    await fsp.rm(dir, { recursive: true, force: true });
+  });
+  const args = { conversation_id: 'mcp-replay', message: 'exact request', request_id: 'request-1' };
+  const first = await connection.client.callTool({ name: 'codex_turn', arguments: args });
+  assert.notEqual(first.isError, true);
+  await connection.client.close();
+  // A repeated backend call would fail in this new process. Only disk replay can succeed.
+  connection = await startClient({ stateDir: dir, stubMode: 'fail-start' });
+  const replay = await connection.client.callTool({ name: 'codex_turn', arguments: args });
+  assert.deepEqual(replay, first);
+  const conflict = await connection.client.callTool({ name: 'codex_turn', arguments: { ...args, message: 'changed' } });
+  assert.equal(conflict.isError, true);
+  assert.match(conflict.content[0].text, /REQUEST_ID_CONFLICT/);
+  const invalid = await connection.client.callTool({ name: 'codex_turn', arguments: { ...args, request_id: '' } });
+  assert.equal(invalid.isError, true);
 });
 
 test('a turn round-trips with structuredContent {reply, thread_id, turn}', async (t) => {
