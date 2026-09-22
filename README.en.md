@@ -25,6 +25,7 @@ Other Claude sub-agent
 | OpenAI Codex CLI | v0.153.4+ (behaviour verified on 0.155.1) | `codex --version`, must be authenticated |
 | PowerShell | Windows 5.1 or 7 | installer; built-in 5.1 + Add-Type for backend |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `=1` | only for experimental teammates; ordinary subagents work without it |
+| `MCP_TOOL_TIMEOUT` | `=3600000` | **without it the client cuts long turns short** - see below |
 
 ## Install
 
@@ -43,6 +44,33 @@ The installer:
 4. Registers the MCP server at user scope (`claude mcp add --scope user codex_bridge`)
 
 Re-run `.\install.ps1` after pulling updates — it is idempotent.
+
+### Timeout: set the client too, or the bridge budget does nothing
+
+The bridge gives one call **30 minutes**, and a caller can change that budget for
+a single turn within 60000-3600000 ms (`timeout_ms` structured, `TIMEOUT_MS:` in
+the envelope). Claude Code has its **own** tool-call timeout, and **the shorter of
+the two wins**. Without the setting below the client gives up before the bridge
+spends its budget — and that tells you nothing about whether Codex is stuck,
+because the turn keeps running and completes into the journal.
+
+In `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "MCP_TOOL_TIMEOUT": "3600000"
+  }
+}
+```
+
+Do not confuse the two: `MCP_TIMEOUT` bounds MCP server **startup**, not a tool
+call. Setting one does not cover the other.
+
+Pick the value from the maximum you want to allow: `1800000` matches the default,
+`3600000` covers the highest permitted override. A value shorter than a budget an
+agent sends in `timeout_ms` is not a misconfiguration — that budget simply does
+not take effect.
 
 Ordinary subagents return their final answer to the caller; team replies use `SendMessage`. The installer verifies the registered command with a real MCP handshake and tool listing, without calling Codex. See [Claude modes, setup and diagnostics](docs/claude-modes.en.md) for `--agent`, in-process/split-pane loading, version limits and isolated installation.
 

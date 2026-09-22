@@ -25,6 +25,7 @@ Jiný Claude sub-agent
 | OpenAI Codex CLI | v0.153.4+ (chování ověřeno na 0.155.1) | `codex --version`, musí být autentizováno |
 | PowerShell | Windows 5.1 nebo 7 | instalátor; vestavěný 5.1 + Add-Type pro backend |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `=1` | jen pro experimentální teammate; běžný subagent jej nepotřebuje |
+| `MCP_TOOL_TIMEOUT` | `=3600000` | **jinak se dlouhé tahy useknou na straně klienta** — viz níže |
 
 ## Instalace
 
@@ -43,6 +44,33 @@ Instalátor:
 4. Zaregistruje MCP server na user scope (`claude mcp add --scope user codex_bridge`)
 
 `.\install.ps1` lze opakovaně spouštět po pullnutí aktualizací — je idempotentní.
+
+### Timeout: nastav i klienta, jinak je bridge k ničemu
+
+Bridge dává jednomu volání **30 minut** a volající si ten strop umí na jeden tah
+změnit v rozsahu 60000–3600000 ms (`timeout_ms` strukturovaně, `TIMEOUT_MS:` v
+obálce). Claude Code má ale **vlastní** timeout na volání nástroje a **rozhoduje
+ten kratší z obou**. Bez nastavení níže klient volání ukončí dřív, než bridge
+vyčerpá svůj rozpočet — a nedozvíš se z toho, že Codex zatuchl, protože tah
+mezitím dál běží a dokončí se do žurnálu.
+
+Do `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "MCP_TOOL_TIMEOUT": "3600000"
+  }
+}
+```
+
+Pozor na záměnu: `MCP_TIMEOUT` je limit na **start** MCP serveru, ne na volání
+nástroje. Nastavení jednoho druhé nenahrazuje.
+
+Hodnotu volej podle maxima, které chceš povolit: `1800000` sedí s defaultem,
+`3600000` pokryje i nejvyšší povolený override. Kratší hodnota než rozpočet,
+který agent pošle v `timeout_ms`, není chyba konfigurace — jen se ten rozpočet
+neprojeví.
 
 Běžný subagent vrací finální odpověď volajícímu; týmové odpovědi doručuje přes `SendMessage`. Instalátor ověřuje registrovaný příkaz skutečným MCP handshakem a seznamem nástrojů, bez volání Codexu. Viz [režimy Claude, nastavení a diagnostika](docs/claude-modes.md): `--agent`, načítání in-process/split-pane, limity verzí a izolovaná instalace.
 
