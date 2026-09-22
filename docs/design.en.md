@@ -60,7 +60,7 @@ Behavior (deterministic, no LLM):
 3. Call Codex, journal its reply and artifact metadata, publish immutable UTF-8 bytes, commit state/transcript and mark the operation completed. Unlock and return `reply` + metadata. A local failure is recovered from the recorded response without repeating the backend call.
 4. If a session cannot be obtained/restored → **return a loud error** (never silently "new session" — that is the amnesia).
 
-**Backing for Codex:** the bridge spawns native `codex app-server` and speaks stdio JSONL. Each connection initializes once; turns use `thread/start` or verified `thread/read` + `thread/resume`, then `turn/start`. The saved thread ID is checked on every resume. Final completed agent messages supply the exact reply; progress and deltas are not reply text. Sandbox and approvals are explicitly read-only/never.
+**Backing for Codex:** the bridge spawns native `codex app-server` and speaks stdio JSONL. Each connection initializes once; turns use `thread/start` or verified `thread/read` + `thread/resume`, then `turn/start`. The saved thread ID is checked on every resume. Final completed agent messages supply the exact reply; progress and deltas are not reply text. Sandbox and approvals are explicitly `danger-full-access`/`never` — see §9.
 
 > The former `codex mcp-server` backend is deprecated. See [official App Server protocol](https://learn.chatgpt.com/docs/app-server) and [deprecation notice](https://learn.chatgpt.com/docs/mcp-server). The public `codex_turn` MCP interface is unchanged.
 
@@ -126,7 +126,7 @@ Each completed response also has `<identityKey>.replies/<sha256(operation_id)>.u
 - In user-scope config use **absolute paths**; `~`/`$HOME`/POSIX paths are not expanded.
 - The installer serializes native paths as JSON-quoted YAML scalars, preserving backslashes and spaces. Do not hand-build unescaped YAML.
 - stdio = newline-delimited JSON → enforce **UTF-8 without BOM and LF**; all CLI chatter on **stderr** (stdout carries only the MCP protocol — anything else breaks the stream, including banners/`Write-Host`).
-- User-scope registration makes the command available across projects; Claude starts a stdio bridge for the session. Each conversation pins its working directory; the backend remains read-only.
+- User-scope registration makes the command available across projects; Claude starts a stdio bridge for the session. Each conversation pins its working directory; that pin is not a filesystem access boundary.
 - Pass prompts via UTF-8 (avoids quoting/encoding hell), not as command-line arguments.
 
 ## 7. Acceptance evidence
@@ -144,7 +144,8 @@ The [relay evaluator](relay-eval.en.md) separates deterministic bridge contracts
 - Addressable member, **not** a symmetric peer. If the CLI side ever *initiates*, there is no one to decide on termination → keep reactive-only.
 - "Verbatim" relay is best-effort; integrity-critical data (diffs, structured output) should be taken from the tool result, not from the relay's prose.
 - Global scope = security and isolation obligations (see §6).
-- **v1 isolation is thread-level only — NOT process/cwd/sandbox-level.** A single shared `codex app-server` process backs all conversations; separation between conversations is only the logical `conversation_id`/`thread_id` keying, not OS-level process isolation. Do not widen the sandbox until the bridge provides per-conversation process isolation.
+- **v1 isolation is thread-level only — NOT process/cwd/sandbox-level.** A single shared `codex app-server` process backs all conversations; separation between conversations is only the logical `conversation_id`/`thread_id` keying, not OS-level process isolation.
+- **The sandbox is off (`danger-full-access`).** The reason is functional, not convenience: Codex 0.155.1 auto-approves MCP tool calls only under full access. Under both `read-only` and `workspace-write` every MCP call ends in `MCP tool call requires approval, but approval policy is never`: under `never` Codex rejects internally and never asks the client. The approval can only be granted under `on-request`, where the App Server sends the client `mcpServer/elicitation/request` — and this transport (`app-server-transport.js:70-73`) refuses every server-to-client request. Callers therefore get an unrestricted Codex with write and network access. The alternative (approval callback plus `on-request`) was checked by hand against Codex 0.155.1 with the read-only sandbox kept: answering `{action:"accept"}` lets the call through. No test here covers it and the repo does not use it.
 
 ## 10. References
 

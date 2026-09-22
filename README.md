@@ -22,7 +22,7 @@ Jiný Claude sub-agent
 |---|---|---|
 | Node.js | v20 | `node --version` |
 | Claude Code CLI | ověřeno native 2.1.126 | viz limity režimů/verzí níže; modelové tahy vyžadují přihlášení |
-| OpenAI Codex CLI | v0.153.4 | `codex --version`, musí být autentizováno |
+| OpenAI Codex CLI | v0.153.4+ (chování ověřeno na 0.155.1) | `codex --version`, musí být autentizováno |
 | PowerShell | Windows 5.1 nebo 7 | instalátor; vestavěný 5.1 + Add-Type pro backend |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `=1` | jen pro experimentální teammate; běžný subagent jej nepotřebuje |
 
@@ -118,7 +118,8 @@ npm --prefix bridge run eval:relay -- --live-codex
 - **Hard-error při ztrátě session.** Selhání obnovy vlákna vyhodí hlasitou chybu — nikdy tiše nezahájí novou session (to by byla neviditelná amnézie).
 - **`model: sonnet` je výchozí volba relay.** Instrukce modelu nezaručují správná volání ani přesné kopírování. [Behaviorální eval](docs/relay-eval.md) zaznamenává skutečná volání, rozdíly bajtů, chyby a kontinuitu po restartu; odděluje stub/živé výsledky a uvádí omezení ověření.
 - **`CONV_ID:` dodává operátor.** Relay klíč nikdy neodvozuje — LLM-hádaný klíč by byl nedeterministický a zlomil by cross-spawn kontinuitu.
-- **v1 limitace:** jeden sdílený `codex app-server` proces obsluhuje všechny konverzace (izolace na úrovni vlákna, ne procesu). Sandbox je read-only. Nerozsiruj sandbox bez přidání per-conversation process isolation.
+- **v1 limitace:** jeden sdílený `codex app-server` proces obsluhuje všechny konverzace (izolace na úrovni vlákna, ne procesu).
+- **Sandbox je `danger-full-access`, tedy žádný.** Codex 0.155.1 auto-schvaluje volání MCP nástrojů jen při plném přístupu; v každém sandboxovaném režimu je pod `never` odmítne interně a volání selže na `MCP tool call requires approval, but approval policy is never` — klient se vůbec nedozví, že se něco schvalovalo. Cenou je, že Codex za bridgem může zapisovat kamkoli a do sítě, a mezi konverzacemi není žádná izolace. Neregistruj bridge tam, kde to nechceš.
 
 ## Aktualizace
 
@@ -145,6 +146,6 @@ npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" test
 
 MIT
 
-Backend používá nativní App Server JSONL (`initialize`/`initialized`, `thread/start`, `thread/read`, `thread/resume`, `turn/start`). Ověřeno s Codex CLI 0.153.4; nekompatibilní odpovědi protokolu vrací explicitní chybu. MCP SDK zůstává závislostí veřejného rozhraní bridge. Viz [životní cyklus a ověření backendu](docs/runbook.md#app-server-backend-a-ověření).
+Backend používá nativní App Server JSONL (`initialize`/`initialized`, `thread/start`, `thread/read`, `thread/resume`, `turn/start`). Ověřeno s Codex CLI 0.153.4 a znovu s 0.155.1; nekompatibilní odpovědi protokolu vrací explicitní chybu. MCP SDK zůstává závislostí veřejného rozhraní bridge. Viz [životní cyklus a ověření backendu](docs/runbook.md#app-server-backend-a-ověření).
 
 Na Windows backend vyžaduje také vestavěný Windows PowerShell 5.1 s povoleným `Add-Type` pro Job Object supervisor. Instalátor zahrnuje oba zdrojové soubory helperu; samostatný binární soubor ani npm závislost se neinstaluje.

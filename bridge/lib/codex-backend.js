@@ -1,5 +1,13 @@
 'use strict';
-// Native Codex App Server v2 over stdio JSONL (CLI 0.153.4). Public codex_turn stays MCP.
+// Native Codex App Server v2 over stdio JSONL (CLI 0.153.4, re-verified against 0.155.1).
+// Public codex_turn stays MCP. Threads run with approvalPolicy 'never' and the
+// danger-full-access sandbox: Codex 0.155.1 auto-approves MCP tool calls only under full
+// access. In any sandboxed mode it rejects them internally under 'never' - the client is
+// never asked - and the approval it wants can only be granted under 'on-request', which
+// needs a client that answers mcpServer/elicitation/request. Callers therefore get an
+// unsandboxed Codex with write and network capability, not a read-only reader. Note the
+// guard below only checks thread/start's echo; turn/start returns no policy, so the
+// sandbox actually in force for a turn cannot be verified through this protocol.
 const fs = require('node:fs');
 const path = require('node:path');
 const { createRequire } = require('node:module');
@@ -140,7 +148,7 @@ class CodexBackend {
       } else cwd = await workingDir.normalize(extra.cwd || this._cwd, this._cwd);
       const result = await conn.request(priorThreadId ? 'thread/resume' : 'thread/start', {
         ...(priorThreadId ? { threadId: priorThreadId } : { ephemeral: false }),
-        cwd, approvalPolicy: 'never', sandbox: 'read-only',
+        cwd, approvalPolicy: 'never', sandbox: 'danger-full-access',
         ...(extra.model ? { model: extra.model } : {}),
       });
       const threadId = requireId(result?.thread?.id, priorThreadId ? 'NO_THREAD_ID_ON_RESUME' : 'NO_THREAD_ID', 'thread id');
@@ -148,8 +156,8 @@ class CodexBackend {
       if (typeof result.cwd !== 'string' || !path.isAbsolute(result.cwd) || await workingDir.normalize(result.cwd, this._cwd) !== cwd) {
         throw failure('WORKING_DIR_MISMATCH', 'App Server did not confirm the requested cwd.');
       }
-      if (result.approvalPolicy !== 'never' || result.sandbox?.type !== 'readOnly' || result.sandbox.networkAccess === true) {
-        throw failure('BACKEND_POLICY_MISMATCH', 'App Server did not confirm read-only sandbox and approval never.');
+      if (result.approvalPolicy !== 'never' || result.sandbox?.type !== 'dangerFullAccess') {
+        throw failure('BACKEND_POLICY_MISMATCH', 'App Server did not confirm full-access sandbox and approval never.');
       }
       return this._turn(conn, threadId, prompt, cwd);
     }, extra.signal);
@@ -204,7 +212,7 @@ class CodexBackend {
     try {
       const result = await conn.request('turn/start', {
         threadId, input: [{ type: 'text', text: prompt }], cwd,
-        approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly', networkAccess: false },
+        approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' },
       });
       ctx.turnId = requireId(result?.turn?.id, 'BACKEND_PROTOCOL_ERROR', 'turn id');
       if (conn.finishedTurns.has(JSON.stringify([threadId, ctx.turnId]))) throw failure('TURN_ID_DRIFT', 'turn/start reused an already completed turn id.');

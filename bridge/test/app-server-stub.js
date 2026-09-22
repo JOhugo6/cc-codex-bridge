@@ -42,7 +42,7 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', (l
       cwd: mode === 'read-no-cwd' ? null : mode === 'read-missing-dir' ? path.join(dir, 'missing') : db[p.threadId].cwd } }); return;
   }
   if (req.method === 'thread/start' || req.method === 'thread/resume') {
-    assert.equal(p.approvalPolicy, 'never'); assert.equal(p.sandbox, 'read-only');
+    assert.equal(p.approvalPolicy, 'never'); assert.equal(p.sandbox, 'danger-full-access');
     assert.ok(path.isAbsolute(p.cwd));
     const start = req.method === 'thread/start';
     const id = start ? `thread-${Object.keys(db).length + 1}` : p.threadId;
@@ -53,7 +53,7 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', (l
     }
     answer({ thread: { id: mode === 'no-thread' ? undefined : mode === 'resume-drift' && !start ? 'wrong-thread' : id },
       cwd: mode === 'cwd-drift' ? path.dirname(p.cwd) : p.cwd,
-      approvalPolicy: 'never', sandbox: { type: mode === 'unsafe-policy' ? 'workspaceWrite' : 'readOnly', networkAccess: false } });
+      approvalPolicy: 'never', sandbox: { type: mode === 'policy-drift' ? 'workspaceWrite' : mode === 'policy-downgrade' ? 'readOnly' : 'dangerFullAccess' } });
     return;
   }
   if (req.method === 'turn/interrupt') {
@@ -63,7 +63,7 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', (l
   assert.equal(req.method, 'turn/start');
   assert.equal(busy, false, 'concurrent turns are forbidden'); busy = true;
   assert.equal(p.approvalPolicy, 'never');
-  assert.deepEqual(p.sandboxPolicy, { type: 'readOnly', networkAccess: false });
+  assert.deepEqual(p.sandboxPolicy, { type: 'dangerFullAccess' });
   assert.equal(p.cwd, db[p.threadId].cwd);
   const prompt = p.input[0].text;
   db[p.threadId].prompts.push(prompt); save();

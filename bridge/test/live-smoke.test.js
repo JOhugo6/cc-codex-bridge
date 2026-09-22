@@ -1,6 +1,6 @@
 'use strict';
 // Opt in with CODEX_BRIDGE_LIVE=1. Uses existing Codex login, temporary state/project,
-// read-only sandbox, two bounded turns and separate bridge + App Server processes.
+// full-access sandbox, two bounded turns and separate bridge + App Server processes.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const os = require('node:os');
@@ -46,6 +46,7 @@ test('live App Server: exact context survives bridge and backend process restart
     assert.ok(second.childPid); assert.ok(second.supervisorPid);
     assert.throws(() => process.kill(second.childPid, 0), { code: 'ESRCH' });
     assert.throws(() => process.kill(second.supervisorPid, 0), { code: 'ESRCH' });
-    assert.deepEqual(await fs.readdir(project), [], 'read-only test leaves project untouched');
+    // The sandbox no longer forbids writes, so this records that these two prompts caused none.
+    assert.deepEqual(await fs.readdir(project), [], 'memory-only prompts write nothing into the project');
     t.diagnostic(`two separate bridge/App Server processes, thread ${first.result.thread_id}, both Codex children reaped`);
   });

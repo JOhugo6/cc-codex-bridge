@@ -17,8 +17,10 @@ The optional evaluations consume the existing accounts' model quota. The stub
 suite has eight fresh Claude invocations and the live Codex suite has two.
 Each Claude invocation has a USD 1 CLI budget limit and a 120-second wall-clock
 limit (180 seconds with real Codex); the Claude budget does not cap Codex usage.
-Only the single MCP tool is allowed, built-in tools are disabled, and the Codex
-backend retains its read-only sandbox. An infrastructure/API failure stops the
+Only the single MCP tool is allowed and built-in tools are disabled. Only
+`--live-codex` starts a real Codex, and it runs with the `danger-full-access`
+sandbox against the user's real MCP servers, whose calls are thereby
+auto-approved; `--stub` starts no Codex at all. An infrastructure/API failure stops the
 suite and labels later cases `skipped`; a behavioral mismatch remains a real
 failure and the other independent cases still run.
 

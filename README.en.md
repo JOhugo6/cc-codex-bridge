@@ -22,7 +22,7 @@ Other Claude sub-agent
 |---|---|---|
 | Node.js | v20 | `node --version` |
 | Claude Code CLI | native 2.1.126 tested | see mode/version limits below; model calls require login |
-| OpenAI Codex CLI | v0.153.4 | `codex --version`, must be authenticated |
+| OpenAI Codex CLI | v0.153.4+ (behaviour verified on 0.155.1) | `codex --version`, must be authenticated |
 | PowerShell | Windows 5.1 or 7 | installer; built-in 5.1 + Add-Type for backend |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `=1` | only for experimental teammates; ordinary subagents work without it |
 
@@ -118,7 +118,8 @@ npm --prefix bridge run eval:relay -- --live-codex
 - **Hard-error on lost session.** A failed resume throws loudly — never silently starts a fresh session (which would be invisible amnesia).
 - **`model: sonnet` is the relay default.** Model instructions do not guarantee correct calls or exact copying. The [behavioral eval](docs/relay-eval.en.md) records actual tool calls, byte differences, errors and restart continuity, with separate stub/live results and explicit verification limits.
 - **`CONV_ID:` is operator-supplied.** The relay never derives the key — an LLM-guessed key would be non-deterministic and break cross-spawn continuity.
-- **v1 limitation:** one shared `codex app-server` process backs all conversations (thread-level isolation, not process-level). Read-only sandbox by default. Do not widen the sandbox without adding per-conversation process isolation.
+- **v1 limitation:** one shared `codex app-server` process backs all conversations (thread-level isolation, not process-level).
+- **The sandbox is `danger-full-access`, i.e. none.** Codex 0.155.1 auto-approves MCP tool calls only under full access; in any sandboxed mode it rejects them internally under `never` and the call fails with `MCP tool call requires approval, but approval policy is never` — the client is never asked. The price is that Codex behind the bridge can write anywhere and reach the network, with no isolation between conversations. Do not register the bridge where that is unacceptable.
 
 ## Updating
 
@@ -145,6 +146,6 @@ npm --prefix "$env:USERPROFILE\.claude\bridges\codex-bridge" test
 
 MIT
 
-The downstream backend uses native App Server JSONL (`initialize`/`initialized`, `thread/start`, `thread/read`, `thread/resume`, `turn/start`). It is tested with Codex CLI 0.153.4; incompatible protocol responses fail explicitly. The MCP SDK remains a dependency for the public bridge interface. See the [backend lifecycle and verification](docs/runbook.en.md#app-server-backend-and-verification).
+The downstream backend uses native App Server JSONL (`initialize`/`initialized`, `thread/start`, `thread/read`, `thread/resume`, `turn/start`). It is tested with Codex CLI 0.153.4 and re-tested on 0.155.1; incompatible protocol responses fail explicitly. The MCP SDK remains a dependency for the public bridge interface. See the [backend lifecycle and verification](docs/runbook.en.md#app-server-backend-and-verification).
 
 On Windows the backend also requires built-in Windows PowerShell 5.1 with `Add-Type` enabled for its Job Object supervisor. The installer includes both helper sources; no separate binary or npm dependency is installed.

@@ -57,7 +57,9 @@ test('persisted threads resume across backend/process restart; no new thread is 
 });
 
 for (const [mode, code] of [
-  ['no-thread', 'NO_THREAD_ID'], ['unsafe-policy', 'BACKEND_POLICY_MISMATCH'], ['cwd-drift', 'WORKING_DIR_MISMATCH'],
+  ['no-thread', 'NO_THREAD_ID'], ['policy-drift', 'BACKEND_POLICY_MISMATCH'],
+  // A silent reversion to the former read-only production policy must fail just as loudly.
+  ['policy-downgrade', 'BACKEND_POLICY_MISMATCH'], ['cwd-drift', 'WORKING_DIR_MISMATCH'],
   ['wrong-thread', 'THREAD_ID_DRIFT'], ['wrong-turn', 'TURN_ID_DRIFT'], ['conflicting-item', 'BACKEND_PROTOCOL_ERROR'],
   ['empty', 'EMPTY_REPLY'], ['failed-turn', 'CODEX_TURN_FAILED'], ['interrupted-turn', 'CANCELLED'],
   ['error-event', 'CODEX_TURN_FAILED'], ['server-request', 'BACKEND_REQUEST_UNSUPPORTED'], ['disconnect', 'BACKEND_DISCONNECTED'],

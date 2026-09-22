@@ -17,7 +17,7 @@ Volitelné evaly čerpají modelovou kvótu existujících účtů. Stub sada sp
 osm nových instancí Claude, živá sada dvě. Každá má CLI limit 1 USD a časový
 limit 120 sekund (180 sekund se skutečným Codexem); rozpočet Claude neomezuje
 spotřebu Codexu. Povolený je pouze jediný MCP nástroj, vestavěné nástroje jsou
-vypnuté a Codex zachovává read-only sandbox. Infrastrukturní/API chyba sadu
+vypnuté. Skutečný Codex spouští jen `--live-codex`, a to v sandboxu `danger-full-access` s uživatelovými reálnými MCP servery, jejichž volání se tím auto-schvalují; `--stub` žádný Codex nespouští. Infrastrukturní/API chyba sadu
 zastaví a další případy označí `skipped`; odchylka chování zůstává skutečným
 selháním a nezávislé případy pokračují.
 
