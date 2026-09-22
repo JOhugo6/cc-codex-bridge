@@ -13,18 +13,34 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
+// A holder may run for the backend call budget, which is 30 min by default and up to 60 min
+// when a caller raises it per call. Both budgets below must outlast that holder, so they are
+// derived from it rather than pinned to a constant that goes stale when the default moves.
+const LOCK_MARGIN_MS = 300000;
+
 const DEFAULT_OPTS = {
-  // How long a WAITER blocks before giving up. A legitimate Codex turn can run 3-10 min (the
-  // backend's 600s callTimeout), so a waiter must tolerate the holder working a long turn plus
-  // its own turn — keep this >= callTimeout to avoid falsely timing out behind a healthy holder.
-  timeoutMs: 900000,
+  // How long a WAITER blocks before giving up. A legitimate Codex turn runs for the backend's
+  // callTimeout (codex-backend.js), so a waiter must tolerate the holder working a long turn
+  // plus its own — keep this >= callTimeout to avoid falsely timing out behind a healthy holder.
+  timeoutMs: 1800000 + LOCK_MARGIN_MS,
   pollMs: 50,
   // A lock older than this is presumed orphaned by a crashed process and forcibly reclaimed.
-  // MUST be >= the backend callTimeout (600s, codex-backend.js): a legitimately long turn holds
-  // the lock that whole time, and the dead-pid stale guard only protects same-host with readable
-  // owner meta. Set above callTimeout so a healthy long turn is never reclaimed out from under us.
-  staleMs: 900000,
+  // MUST be >= the backend callTimeout: a legitimately long turn holds the lock that whole time,
+  // and the dead-pid stale guard only protects same-host with readable owner meta. A 30s
+  // heartbeat refreshes a healthy holder, so this only has to cover a wedged one.
+  staleMs: 1800000 + LOCK_MARGIN_MS,
 };
+
+// Keep both budgets above the call budget actually in force, so a per-call raise stays safe.
+function optsForCallTimeout(callTimeoutMs, overrides = {}) {
+  if (!Number.isInteger(callTimeoutMs)) return overrides;
+  const floor = callTimeoutMs + LOCK_MARGIN_MS;
+  return {
+    ...overrides,
+    timeoutMs: Math.max(overrides.timeoutMs ?? DEFAULT_OPTS.timeoutMs, floor),
+    staleMs: Math.max(overrides.staleMs ?? DEFAULT_OPTS.staleMs, floor),
+  };
+}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -148,4 +164,4 @@ function ensureStateDirSync(stateDirPath) {
   fs.mkdirSync(stateDirPath, { recursive: true });
 }
 
-module.exports = { acquire, ensureStateDirSync, heartbeat, DEFAULT_OPTS };
+module.exports = { acquire, ensureStateDirSync, heartbeat, optsForCallTimeout, DEFAULT_OPTS, LOCK_MARGIN_MS };

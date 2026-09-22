@@ -129,8 +129,8 @@ async function main() {
         if (request.params.task) {
           throw Object.assign(new Error('codex_turn does not support task-augmented calls.'), { code: 'INVALID_ARGUMENTS' });
         }
-        const { conversation_id, message, working_dir, request_id } = parseToolInput(request.params.arguments);
-        const out = await bridge.turn(conversation_id, message, { working_dir, request_id, signal: extra.signal });
+        const { conversation_id, message, working_dir, request_id, timeout_ms } = parseToolInput(request.params.arguments);
+        const out = await bridge.turn(conversation_id, message, { working_dir, request_id, timeout_ms, signal: extra.signal });
         outputSchema.parse(out);
         return {
           // Keep the compatible reply field/text block; expose immutable bytes directly to

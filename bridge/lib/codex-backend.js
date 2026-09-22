@@ -45,6 +45,20 @@ function pickCommand(overrideCommand, overrideArgs) {
   throw failure('CODEX_NOT_FOUND', 'Cannot resolve native Codex on PATH. Install @openai/codex including its platform package, or put codex.exe on PATH.');
 }
 
+// A governed analysis turn routinely exceeds ten minutes, so the default is 30. The ceiling
+// is what lock.js must outlast: a waiter behind a healthy holder, and the stale-lock reclaim,
+// are both derived from it in bridge.js. Raising MAX without raising those breaks that invariant.
+const MIN_CALL_TIMEOUT_MS = 60000;
+const DEFAULT_CALL_TIMEOUT_MS = 1800000;
+const MAX_CALL_TIMEOUT_MS = 3600000;
+
+function assertCallTimeout(value) {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw failure('INVALID_TIMEOUT', 'timeout must be a positive integer number of milliseconds.');
+  }
+  return value;
+}
+
 function requireId(value, code, label) {
   if (typeof value !== 'string' || !value) throw failure(code, `App Server returned no ${label}.`);
   return value;
@@ -56,7 +70,7 @@ class CodexBackend {
     this._active = null;
     this._closed = false;
     this._callMutexTail = Promise.resolve();
-    this._callTimeoutMs = opts.callTimeoutMs ?? 600000;
+    this._callTimeoutMs = assertCallTimeout(opts.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS);
     this._readinessTimeoutMs = opts.readinessTimeoutMs ?? 60000;
     this._interruptTimeoutMs = opts.interruptTimeoutMs ?? 1000;
     this._overrideCommand = opts.command;
@@ -97,12 +111,15 @@ class CodexBackend {
     }
   }
 
-  _serial(action, signal) {
+  _serial(action, signal, timeoutMs) {
     const queued = this._callMutexTail.then(async () => {
+      // Validate inside the queued task: every other failure on this path is a rejected
+      // promise, and a synchronous throw here would need different handling by callers.
+      const callTimeoutMs = timeoutMs === undefined ? this._callTimeoutMs : assertCallTimeout(timeoutMs);
       if (this._closed) throw failure('BACKEND_CLOSED', 'Codex backend is closed.');
       if (signal?.aborted) throw failure('CANCELLED', 'Codex request cancelled.');
       try {
-        return await this._bounded((async () => action(await this._ensureConnected()))(), this._callTimeoutMs, signal);
+        return await this._bounded((async () => action(await this._ensureConnected()))(), callTimeoutMs, signal);
       } catch (err) {
         const conn = this._transport;
         if (conn) {
@@ -131,7 +148,7 @@ class CodexBackend {
   }
 
   getThreadWorkingDir(threadId, extra = {}) {
-    return this._serial((conn) => this._readThread(conn, threadId), extra.signal);
+    return this._serial((conn) => this._readThread(conn, threadId), extra.signal, extra.timeoutMs);
   }
 
   startSession(prompt, extra = {}) { return this._session(null, prompt, extra); }
@@ -160,7 +177,7 @@ class CodexBackend {
         throw failure('BACKEND_POLICY_MISMATCH', 'App Server did not confirm full-access sandbox and approval never.');
       }
       return this._turn(conn, threadId, prompt, cwd);
-    }, extra.signal);
+    }, extra.signal, extra.timeoutMs);
   }
 
   async _turn(conn, threadId, prompt, cwd) {
@@ -232,4 +249,7 @@ class CodexBackend {
   }
 }
 
-module.exports = { CodexBackend, pickCommand };
+module.exports = {
+  CodexBackend, pickCommand,
+  MIN_CALL_TIMEOUT_MS, DEFAULT_CALL_TIMEOUT_MS, MAX_CALL_TIMEOUT_MS,
+};

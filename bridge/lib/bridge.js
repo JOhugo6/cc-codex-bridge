@@ -65,7 +65,10 @@ class CodexBridge {
 
     lock.ensureStateDirSync(paths.stateDir());
     const lockDirPath = paths.lockDir(conversationId);
-    const release = await lock.acquire(lockDirPath, this.lockOpts);
+    // lock.js requires timeoutMs/staleMs >= the backend call budget. Derive them from THIS
+    // call's budget so a per-call raise cannot make a waiter expire behind a healthy holder,
+    // nor let stale detection reclaim a lock a long turn is legitimately still holding.
+    const release = await lock.acquire(lockDirPath, lock.optsForCallTimeout(opts.timeout_ms, this.lockOpts));
     // Start a heartbeat so stale detection does not reclaim the lock during a long Codex turn.
     // Fire-and-forget: errors in the heartbeat must not propagate.
     const HEARTBEAT_INTERVAL_MS = 30000;
@@ -111,7 +114,7 @@ class CodexBridge {
       // journal history. The normal durable operation records and commits the verified binding.
       let directoryState = prior;
       if (prior?.thread_id && prior.working_dir === undefined && typeof this.backend.getThreadWorkingDir === 'function') {
-        const verified = await this.backend.getThreadWorkingDir(prior.thread_id, { signal: opts.signal });
+        const verified = await this.backend.getThreadWorkingDir(prior.thread_id, { signal: opts.signal, ...(opts.timeout_ms ? { timeoutMs: opts.timeout_ms } : {}) });
         directoryState = { ...prior, working_dir: verified };
       }
       const cwd = await workingDir.forTurn(directoryState, opts.working_dir, this.defaultWorkingDir);
@@ -130,9 +133,9 @@ class CodexBridge {
         if (lockMeta && lockMeta.token) startHeartbeat(lockMeta.token);
 
         if (isNew) {
-          result = await this.backend.startSession(message, { cwd, ...(opts.signal ? { signal: opts.signal } : {}) });
+          result = await this.backend.startSession(message, { cwd, ...(opts.timeout_ms ? { timeoutMs: opts.timeout_ms } : {}), ...(opts.signal ? { signal: opts.signal } : {}) });
         } else {
-          result = await this.backend.continueSession(prior.thread_id, message, { cwd, ...(opts.signal ? { signal: opts.signal } : {}) });
+          result = await this.backend.continueSession(prior.thread_id, message, { cwd, ...(opts.timeout_ms ? { timeoutMs: opts.timeout_ms } : {}), ...(opts.signal ? { signal: opts.signal } : {}) });
         }
       } catch (err) {
         // LOUD failure. We do NOT fall back to a fresh session on a resume failure.

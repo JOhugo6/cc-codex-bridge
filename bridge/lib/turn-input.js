@@ -2,6 +2,7 @@
 // The relay supplies the complete envelope; only deterministic code interprets its header.
 const { z } = require('zod');
 const paths = require('./paths');
+const { MIN_CALL_TIMEOUT_MS, DEFAULT_CALL_TIMEOUT_MS, MAX_CALL_TIMEOUT_MS } = require('./codex-backend');
 const operations = require('./operations');
 const workingDir = require('./working-dir');
 
@@ -18,11 +19,17 @@ const structuredSchema = z.strictObject({
     'Existing directory, canonicalized and pinned on the first turn. Defaults to the bridge launch cwd; ' +
     'relative paths resolve there. Later turns inherit the saved directory and reject a different directory.'
   ),
+  timeout_ms: z.int().min(MIN_CALL_TIMEOUT_MS).max(MAX_CALL_TIMEOUT_MS).optional().describe(
+    `Wall-clock limit for this one call in ms, ${MIN_CALL_TIMEOUT_MS}-${MAX_CALL_TIMEOUT_MS}, default ` +
+    `${DEFAULT_CALL_TIMEOUT_MS}. Raise it for a long analysis turn, lower it for a quick probe. It bounds ` +
+    'the whole operation, not just the model turn, and applies to this call only. The MCP client has its ' +
+    'own tool timeout; whichever is shorter wins.'
+  ),
 });
 const envelopeSchema = z.strictObject({
   envelope: z.string().max(MAX_ENVELOPE_LENGTH).describe(
     'The entire incoming relay message, unchanged. First physical line: CONV_ID: <id>, optionally ' +
-    '; WORKING_DIR: <JSON string> and/or ; REQUEST_ID: <id>, each at most once in either order. ' +
+    '; WORKING_DIR: <JSON string>, ; REQUEST_ID: <id> and/or ; TIMEOUT_MS: <integer ms>, each at most once in any order. ' +
     'Header whitespace is ASCII space/tab only; LF or CRLF separates the nonempty body. ' +
     'Header limit 4096 and body limit 100000 UTF-16 code units. Do not pass any other arguments.'
   ),
@@ -40,7 +47,8 @@ function failure(code, message) {
 
 function badHeader() {
   return failure('INVALID_ENVELOPE_HEADER', 'The first physical line must be CONV_ID: <id>, with optional ' +
-    '; WORKING_DIR: <JSON string> and/or ; REQUEST_ID: <id>. Only ASCII spaces/tabs are header whitespace; ' +
+    '; WORKING_DIR: <JSON string>, ; REQUEST_ID: <id> and/or ; TIMEOUT_MS: <integer ms>. ' +
+    'Only ASCII spaces/tabs are header whitespace; ' +
     'unknown, duplicate or malformed metadata is not allowed.');
 }
 
@@ -63,7 +71,7 @@ function parseEnvelope(envelope) {
   remaining = remaining.slice(header[0].length);
   const seen = new Set();
   while (remaining.length) {
-    const prefix = /^;[ \t]*(WORKING_DIR|REQUEST_ID):[ \t]*/.exec(remaining);
+    const prefix = /^;[ \t]*(WORKING_DIR|REQUEST_ID|TIMEOUT_MS):[ \t]*/.exec(remaining);
     if (!prefix || seen.has(prefix[1])) throw badHeader();
     const key = prefix[1];
     seen.add(key);
@@ -73,9 +81,15 @@ function parseEnvelope(envelope) {
       ? /^"(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"/.exec(remaining)
       : /^[A-Za-z0-9._-]{1,200}(?=[ \t;]|$)/.exec(remaining);
     if (!value) throw badHeader();
-    parsed[key === 'WORKING_DIR' ? 'working_dir' : 'request_id'] = key === 'WORKING_DIR'
-      ? JSON.parse(value[0]) : value[0];
+    if (key === 'WORKING_DIR') parsed.working_dir = JSON.parse(value[0]);
+    else if (key === 'TIMEOUT_MS') parsed.timeout_ms = /^[0-9]{1,9}$/.test(value[0]) ? Number(value[0]) : NaN;
+    else parsed.request_id = value[0];
     remaining = remaining.slice(value[0].length).replace(/^[ \t]*/, '');
+  }
+  if (parsed.timeout_ms !== undefined && !(Number.isInteger(parsed.timeout_ms)
+      && parsed.timeout_ms >= MIN_CALL_TIMEOUT_MS && parsed.timeout_ms <= MAX_CALL_TIMEOUT_MS)) {
+    throw failure('INVALID_ENVELOPE_HEADER',
+      `TIMEOUT_MS must be an integer between ${MIN_CALL_TIMEOUT_MS} and ${MAX_CALL_TIMEOUT_MS}.`);
   }
   operations.assertRequestId(parsed.request_id);
   workingDir.assertInput(parsed.working_dir);
@@ -90,7 +104,7 @@ function parseToolInput(args) {
   const result = inputSchema.safeParse(args);
   if (!result.success) {
     throw failure('INVALID_ARGUMENTS', 'Input validation failed: supply either {envelope} alone or ' +
-      '{conversation_id, message, working_dir?, request_id?}. Unknown keys, mixed modes, invalid types ' +
+      '{conversation_id, message, working_dir?, request_id?, timeout_ms?}. Unknown keys, mixed modes, invalid types ' +
       'and values outside the advertised schema are rejected. ' + result.error.message);
   }
   return Object.hasOwn(result.data, 'envelope') ? parseEnvelope(result.data.envelope) : result.data;

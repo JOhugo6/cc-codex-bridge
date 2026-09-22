@@ -95,3 +95,59 @@ test('error serialization is a single unambiguous line and preserves decoded det
   assert.doesNotMatch(text, /[\r\n\u0085\u2028\u2029]/);
   assert.deepEqual(JSON.parse(text.slice('CODEX-BRIDGE ERROR: '.length)), { code: err.code, message: err.message });
 });
+
+test('per-call timeout is accepted in both modes and bounded at the input boundary', () => {
+  const { MIN_CALL_TIMEOUT_MS, DEFAULT_CALL_TIMEOUT_MS, MAX_CALL_TIMEOUT_MS } = require('../lib/codex-backend');
+  assert.ok(MIN_CALL_TIMEOUT_MS < DEFAULT_CALL_TIMEOUT_MS && DEFAULT_CALL_TIMEOUT_MS <= MAX_CALL_TIMEOUT_MS);
+
+  // Omitting it stays omitted: the backend, not the parser, supplies the default.
+  assert.deepEqual(parseToolInput({ conversation_id: 'a', message: 'm' }),
+    { conversation_id: 'a', message: 'm' });
+
+  for (const value of [MIN_CALL_TIMEOUT_MS, DEFAULT_CALL_TIMEOUT_MS, MAX_CALL_TIMEOUT_MS]) {
+    assert.deepEqual(parseToolInput({ conversation_id: 'a', message: 'm', timeout_ms: value }),
+      { conversation_id: 'a', message: 'm', timeout_ms: value });
+    assert.deepEqual(parseEnvelope(`CONV_ID: a; TIMEOUT_MS: ${value}\nm`),
+      { conversation_id: 'a', message: 'm', timeout_ms: value });
+  }
+
+  // Both modes reject the same out-of-range and malformed values rather than clamping them.
+  for (const value of [MIN_CALL_TIMEOUT_MS - 1, MAX_CALL_TIMEOUT_MS + 1, 0, -1, 1.5, '600000', null]) {
+    assert.throws(() => parseToolInput({ conversation_id: 'a', message: 'm', timeout_ms: value }),
+      { code: 'INVALID_ARGUMENTS' }, `structured must reject ${value}`);
+  }
+  for (const header of [`TIMEOUT_MS: ${MIN_CALL_TIMEOUT_MS - 1}`, `TIMEOUT_MS: ${MAX_CALL_TIMEOUT_MS + 1}`,
+    'TIMEOUT_MS: 0', 'TIMEOUT_MS: abc', 'TIMEOUT_MS: -1', 'TIMEOUT_MS: 1.5', 'TIMEOUT_MS:',
+    'TIMEOUT_MS: 600000; TIMEOUT_MS: 600000']) {
+    assert.throws(() => parseEnvelope(`CONV_ID: a; ${header}\nm`),
+      { code: 'INVALID_ENVELOPE_HEADER' }, `envelope must reject ${header}`);
+  }
+
+  // A digit run must not be mistaken for a request id, nor survive as a bare string.
+  const mixed = parseEnvelope('CONV_ID: a; REQUEST_ID: r1; TIMEOUT_MS: 900000; WORKING_DIR: "C:/P"\nm');
+  assert.deepEqual(mixed,
+    { conversation_id: 'a', message: 'm', request_id: 'r1', timeout_ms: 900000, working_dir: 'C:/P' });
+});
+
+test('lock budgets stay above whatever call budget is actually in force', () => {
+  const lock = require('../lib/lock');
+  const { DEFAULT_CALL_TIMEOUT_MS, MAX_CALL_TIMEOUT_MS } = require('../lib/codex-backend');
+
+  // The shipped defaults must already satisfy the invariant lock.js documents.
+  assert.ok(lock.DEFAULT_OPTS.timeoutMs >= DEFAULT_CALL_TIMEOUT_MS);
+  assert.ok(lock.DEFAULT_OPTS.staleMs >= DEFAULT_CALL_TIMEOUT_MS);
+
+  // A per-call raise must lift both budgets with it, or a waiter expires behind a healthy
+  // holder and stale detection reclaims a lock a long turn is still legitimately holding.
+  for (const call of [MAX_CALL_TIMEOUT_MS, DEFAULT_CALL_TIMEOUT_MS, 60000]) {
+    const opts = lock.optsForCallTimeout(call);
+    assert.ok(opts.timeoutMs >= call, `waiter must outlast a ${call}ms call`);
+    assert.ok(opts.staleMs >= call, `stale reclaim must outlast a ${call}ms call`);
+  }
+  // A lowered per-call budget never drops the budgets below the shipped floor.
+  const lowered = lock.optsForCallTimeout(60000);
+  assert.equal(lowered.timeoutMs, lock.DEFAULT_OPTS.timeoutMs);
+  assert.equal(lowered.staleMs, lock.DEFAULT_OPTS.staleMs);
+  // No per-call budget means the caller's own overrides are returned untouched.
+  assert.deepEqual(lock.optsForCallTimeout(undefined, { pollMs: 7 }), { pollMs: 7 });
+});

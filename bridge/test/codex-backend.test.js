@@ -266,3 +266,27 @@ test('raw MCP stdin EOF exits bridge and owned child tree without client-side ki
   assert.match(diagnostics, /shutting down on stdin EOF/);
   for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
 });
+
+test('per-call timeout overrides the instance default in both directions', async (t) => {
+  // A short per-call budget must fire against a hung backend even though the instance
+  // default is long, proving the caller's value is the one actually enforced.
+  const env = setup(t, 'hang', { callTimeoutMs: 600000, descendant: true }); const b = env.backend();
+  const started = Date.now();
+  await assert.rejects(b.startSession('test', { cwd: env.project, timeoutMs: 900 }), { code: 'TIMEOUT' });
+  assert.ok(Date.now() - started < 60000, 'the per-call budget, not the instance default, bounded the call');
+  for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
+
+  // A long per-call budget must not shorten a healthy turn that finishes well inside it.
+  env.config('normal');
+  assert.equal((await b.continueSession('thread-1', 'recall', { timeoutMs: 1800000 })).content, 'test');
+});
+
+test('a malformed per-call timeout is rejected before any backend work', async (t) => {
+  const env = setup(t, 'normal'); const b = env.backend();
+  for (const bad of [0, -1, 1.5, '60000', null]) {
+    await assert.rejects(b.startSession('test', { cwd: env.project, timeoutMs: bad }), { code: 'INVALID_TIMEOUT' });
+  }
+  // The stub only creates the wire log once it is spoken to, so its absence is the proof
+  // that a malformed budget never reached the backend at all.
+  assert.equal(fs.existsSync(path.join(env.dir, 'wire.jsonl')), false);
+});
