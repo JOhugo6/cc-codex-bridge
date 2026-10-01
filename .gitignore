@@ -1,2 +1,4 @@
 bridge/node_modules/
 *.log
+.serena
+quality-loop
