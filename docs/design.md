@@ -48,8 +48,8 @@ Tři vrstvy, jasně oddělené:
 Most je **vlastní tenký stdio MCP server**, který drží stav. Vystavuje **jeden** nástroj:
 
 ```
-codex_turn({ envelope: string }) -> { reply: string, thread_id: string, turn: int, reply_artifact: object }
-codex_turn({ conversation_id: string, message: string, working_dir?: string, request_id?: string }) -> same result
+codex_turn({ envelope: string }) -> { reply: string, thread_id: string, turn: int, reply_artifact: object, request_artifacts: array }
+codex_turn({ conversation_id: string, message: string, attachments?: array, working_dir?: string, request_id?: string, timeout_ms?: int }) -> same result
 ```
 
 Vstupní režimy se nesmějí kombinovat; neznámé argumenty se odmítnou. Relay předá celou obálku beze změn. Deterministický kód bridge parsuje pouze její první fyzický řádek a zachová celé tělo za oddělovačem LF/CRLF. [Runbook](runbook.md#deterministická-obálka-a-chybový-kontrakt) definuje gramatiku, limity a jednořádkový JSON formát chyb.
@@ -65,6 +65,12 @@ Chování (deterministické, žádný LLM):
 > Původní backend `codex mcp-server` je deprecated. Viz [oficiální protokol App Server](https://learn.chatgpt.com/docs/app-server) a [oznámení deprecation](https://learn.chatgpt.com/docs/mcp-server). Veřejné MCP rozhraní `codex_turn` zůstává stejné.
 
 ### 4.2 Stav na disku (NE v kontextu LLM)
+
+Strukturovaný vstup může obsahovat přísné objekty `attachments: [{id, path, expected_sha256?}]`. Právě jeden `{{attachment:<id>}}` v původní zprávě určuje přesné místo každého úplného souboru. Bridge ověří zprávu na původních třech hranicích 100000 UTF-16 jednotek a teprve potom vloží kódem načtené bajty; výsledný prompt tímto limitem znovu neověřuje. Neznámé/duplicitní/neúplné reference, duplicitní ID a nepoužité přílohy jsou chyby. Náhrada má jediný průchod; obsah souboru se znovu neinterpretuje. Bez pole `attachments` jsou všechny podobné tokeny doslovný text, také v obálce a starých journalech.
+
+Relativní cesty vycházejí z připnutého cwd; `realpath` musí vést k běžnému souboru uvnitř něj. Jde o hygienu a auditovatelnost, nikoli sandbox. Jedno načtení přes file handle dodá buffer pro SHA-256, délku a fatální UTF-8 dekódování s ponecháním BOM. Neplatné UTF-8 a neshoda `expected_sha256` selžou bez backendového volání. Obsah i metadata jsou součástí vstupu v journalu; kanonická cesta a volitelný pin patří do identity replay. `request_artifacts` ve výsledku váže `{id, path, sha256, byte_length, conversation_id, operation_id, turn, request_id}` na zaznamenané doručení.
+
+Každá příloha má neměnný `<identityKey>.requests/<sha256(operation_id)>/<sha256(id)>.utf8`. Stejně jako odpověď používá flush dočasného souboru, hard link bez přepsání a na POSIX fsync adresáře. Přílohy se publikují před uložením intentu a před backendem; selhání může zanechat osiřelý artefakt, ale ne vyvolat vzdálený tah. Po uložení `pending` platí stávající zákaz nejistého opakování. Dokončený replay a offline `finish` ověří artefakty a chybějící soubor rekonstruují z přesného obsahu journalu, nikdy ze změněného zdroje. Podrobnosti viz [runbook](runbook.md#přesné-vstupní-bajty-a-přílohy).
 
 Každá dokončená odpověď má také `<identityKey>.replies/<sha256(operation_id)>.utf8`. `reply_artifact` ve výsledku nástroje obsahuje trvalé MCP URI, SHA-256, délku bajtů a identitu konverzace/operace/tahu/požadavku. `resources/read` ověří soubor a vrátí base64 blob `Buffer.from(reply, 'utf8')` přímo klientovi. Relay má instrukci odpověď kopírovat, ale jeho próza nemá bajtovou záruku. Viz [přesné načtení a obnova](runbook.md#přesné-bajty-odpovědi-a-mcp-resources).
 

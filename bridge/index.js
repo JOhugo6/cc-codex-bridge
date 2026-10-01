@@ -73,10 +73,12 @@ async function main() {
       instructions:
         'Deterministic bridge to OpenAI Codex CLI. Relays call codex_turn with only envelope: ' +
         'the complete incoming message unchanged. Direct callers may instead supply conversation_id, ' +
-        'message and optional working_dir/request_id. Never mix these modes. The bridge owns ' +
+        'message and optional working_dir/request_id/attachments/timeout_ms. Never mix these modes. The bridge owns ' +
         'thread continuity on disk; return reply verbatim or the single-line tool error unchanged. ' +
         'For exact output bytes, clients read reply_artifact.uri with resources/read and decode its base64 blob; ' +
-        'verify reply_artifact.sha256 and byte_length in code. LLM relay prose has no byte guarantee.',
+        'verify reply_artifact.sha256 and byte_length in code. LLM relay prose has no byte guarantee. ' +
+        'For exact input bytes, use structured attachments: the bridge reads and hashes each UTF-8 file, ' +
+        'then replaces exactly one {{attachment:<id>}} per id in message. Model-transcribed message text has no byte guarantee.',
     }
   );
 
@@ -84,6 +86,11 @@ async function main() {
     reply: z.string().describe('Codex reply text, verbatim.'),
     thread_id: z.string().describe('Persisted Codex thread id for this conversation.'),
     turn: z.number().int().describe('1-based turn number within this conversation.'),
+    request_artifacts: z.array(z.object({
+      id: z.string(), path: z.string(), sha256: z.string().regex(/^[a-f0-9]{64}$/),
+      byte_length: z.number().int().nonnegative(), conversation_id: z.string(), operation_id: z.string(),
+      turn: z.number().int().positive(), request_id: z.string().nullable(),
+    })).describe('Immutable delivered UTF-8 attachments with canonical source paths, code-computed digests and operation identity; empty when no attachments.'),
     reply_artifact: z.object({
       uri: z.string(), mimeType: z.literal(replyArtifacts.MIME_TYPE),
       sha256: z.string().regex(/^[a-f0-9]{64}$/), byte_length: z.number().int().nonnegative(),
@@ -100,9 +107,13 @@ async function main() {
       description:
         'Send one message to OpenAI Codex as an addressable team member and get its reply. ' +
         'Pass either {envelope} with the complete raw relay message, or direct structured ' +
-        '{conversation_id, message, working_dir?, request_id?}; no mixed or unknown arguments. ' +
+        '{conversation_id, message, attachments?, working_dir?, request_id?, timeout_ms?}; no mixed or unknown arguments. ' +
         'Use the same exact conversation ID throughout the exchange. The bridge persists ' +
-        'thread continuity and fails loudly when a session cannot be resumed.',
+        'thread continuity and fails loudly when a session cannot be resumed. ' +
+        'For exact input bytes, structured attachments contain {id, path, expected_sha256?}; the bridge reads and hashes ' +
+        'UTF-8 files inside the pinned working_dir and replaces exactly one {{attachment:<id>}} per id in message. ' +
+        'Model-transcribed message text has no byte guarantee. For exact output bytes, read reply_artifact.uri ' +
+        'and verify its SHA-256 and byte length in code; LLM relay prose has no byte guarantee.',
       inputSchema: inputJsonSchema,
       outputSchema: z.toJSONSchema(outputSchema),
     }],
@@ -129,8 +140,8 @@ async function main() {
         if (request.params.task) {
           throw Object.assign(new Error('codex_turn does not support task-augmented calls.'), { code: 'INVALID_ARGUMENTS' });
         }
-        const { conversation_id, message, working_dir, request_id, timeout_ms } = parseToolInput(request.params.arguments);
-        const out = await bridge.turn(conversation_id, message, { working_dir, request_id, timeout_ms, signal: extra.signal });
+        const { conversation_id, message, attachments, working_dir, request_id, timeout_ms } = parseToolInput(request.params.arguments);
+        const out = await bridge.turn(conversation_id, message, { attachments, working_dir, request_id, timeout_ms, signal: extra.signal });
         outputSchema.parse(out);
         return {
           // Keep the compatible reply field/text block; expose immutable bytes directly to

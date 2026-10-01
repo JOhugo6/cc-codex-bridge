@@ -103,6 +103,8 @@ The examples below are pseudocode. Create/spawn the teammate first, and use the 
 
 For exact diffs/code, retain the direct MCP result: `reply_artifact` provides an immutable UTF-8 resource URI, SHA-256, byte length and turn identity. Retrieve it with `resources/read` and verify the decoded bytes in code; the relay's prose is best effort. See [exact reply retrieval](docs/runbook.en.md#exact-reply-bytes-and-mcp-resources).
 
+For exact **input** bytes, call structured `codex_turn` with `attachments: [{id, path, expected_sha256?}]` and exactly one `{{attachment:<id>}}` in `message` per attachment. The bridge reads each file inside the pinned `working_dir` once, validates UTF-8, computes SHA-256 and inserts its whole contents without changing BOM, whitespace or line endings. Result `request_artifacts` reports canonical path, digest, length and operation identity. The 100000 UTF-16-unit limit still applies to the caller's message before insertion; the bridge adds no attachment size cap. Model-transcribed `message` text has no byte guarantee. The envelope remains one opaque string; use direct structured calls for attachments. See [input bytes and recovery](docs/runbook.en.md#exact-input-bytes-and-attachments).
+
 ```python
 # Example: orchestrator sends a message to codex-peer
 SendMessage(to="codex-peer", message="""CONV_ID: sprint42--arch-review

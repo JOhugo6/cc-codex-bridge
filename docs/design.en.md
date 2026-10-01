@@ -48,8 +48,8 @@ Three layers, clearly separated:
 The bridge is a **thin custom stdio MCP server** that owns state. It exposes **one** tool:
 
 ```
-codex_turn({ envelope: string }) -> { reply: string, thread_id: string, turn: int, reply_artifact: object }
-codex_turn({ conversation_id: string, message: string, working_dir?: string, request_id?: string }) -> same result
+codex_turn({ envelope: string }) -> { reply: string, thread_id: string, turn: int, reply_artifact: object, request_artifacts: array }
+codex_turn({ conversation_id: string, message: string, attachments?: array, working_dir?: string, request_id?: string, timeout_ms?: int }) -> same result
 ```
 
 The two input modes are exclusive; unknown arguments fail. The relay passes the entire envelope unchanged. Deterministic bridge code parses only its first physical line and preserves all body text after the LF/CRLF separator. The [runbook](runbook.en.md#deterministic-envelope-and-error-contract) defines the grammar, limits and single-line JSON error format.
@@ -65,6 +65,12 @@ Behavior (deterministic, no LLM):
 > The former `codex mcp-server` backend is deprecated. See [official App Server protocol](https://learn.chatgpt.com/docs/app-server) and [deprecation notice](https://learn.chatgpt.com/docs/mcp-server). The public `codex_turn` MCP interface is unchanged.
 
 ### 4.2 State on disk (NOT in LLM context)
+
+Structured input may contain strict `attachments: [{id, path, expected_sha256?}]` objects. Exactly one `{{attachment:<id>}}` in the original message places each complete file. The bridge validates the caller's message at all three original 100000 UTF-16-unit boundaries before inserting bytes read by code; it does not recheck the rendered prompt against that limit. Unknown/duplicate/malformed references, duplicate IDs and unused attachments are errors. Replacement makes one pass; file content is never interpreted again. With `attachments` absent, all such tokens remain literal text, including envelope bodies and legacy journals.
+
+Relative paths start at the pinned cwd; `realpath` must identify a regular file inside it. This is hygiene and auditability, not a sandbox. One file-handle read supplies the buffer for SHA-256, byte length and fatal UTF-8 decoding with BOM retained. Invalid UTF-8 and an `expected_sha256` mismatch fail before any backend call. The journal input records content and metadata; canonical path and optional pin belong to replay identity. Result `request_artifacts` binds `{id, path, sha256, byte_length, conversation_id, operation_id, turn, request_id}` to the recorded delivery.
+
+Each attachment has an immutable `<identityKey>.requests/<sha256(operation_id)>/<sha256(id)>.utf8`. Like replies, publication flushes a temporary file, uses a no-replace hard link, and fsyncs its directory on POSIX. Attachments are published before the durable intent and backend call; a failure may leave an orphan artifact but cannot send a remote turn. After `pending` is saved, the existing uncertain-retry block applies. Completed replay and offline `finish` verify artifacts and reconstruct missing files from exact journal content, never from a changed source. See the [runbook](runbook.en.md#exact-input-bytes-and-attachments).
 
 Each completed response also has `<identityKey>.replies/<sha256(operation_id)>.utf8`. The tool's `reply_artifact` includes a durable MCP URI, SHA-256, byte length and conversation/operation/turn/request identity. `resources/read` verifies the file and returns a base64 blob of `Buffer.from(reply, 'utf8')`, directly to the client. The relay is instructed to copy the reply, but its generated prose carries no byte guarantee. See [exact retrieval and recovery](runbook.en.md#exact-reply-bytes-and-mcp-resources).
 

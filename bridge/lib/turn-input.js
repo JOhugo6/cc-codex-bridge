@@ -5,6 +5,7 @@ const paths = require('./paths');
 const { MIN_CALL_TIMEOUT_MS, DEFAULT_CALL_TIMEOUT_MS, MAX_CALL_TIMEOUT_MS } = require('./codex-backend');
 const operations = require('./operations');
 const workingDir = require('./working-dir');
+const { attachmentSchema } = require('./request-artifacts');
 
 const MAX_HEADER_LENGTH = 4096;
 const MAX_MESSAGE_LENGTH = 100000;
@@ -14,6 +15,7 @@ const idSchema = z.string().min(1).max(200).regex(/^[A-Za-z0-9._-]+(?![\s\S])/);
 const structuredSchema = z.strictObject({
   conversation_id: idSchema.describe('Stable, case-sensitive conversation key; keep it constant across turns.'),
   message: z.string().min(1).max(MAX_MESSAGE_LENGTH).describe('Exact message text; never trimmed.'),
+  attachments: z.array(attachmentSchema).optional().describe('Exact input bytes: each UTF-8 file replaces exactly one {{attachment:<id>}} in message. No attachment content size cap.'),
   request_id: idSchema.optional().describe('Optional request ID. Reuse only to redeliver the same request.'),
   working_dir: z.string().min(1).max(500).optional().describe(
     'Existing directory, canonicalized and pinned on the first turn. Defaults to the bridge launch cwd; ' +
@@ -104,7 +106,7 @@ function parseToolInput(args) {
   const result = inputSchema.safeParse(args);
   if (!result.success) {
     throw failure('INVALID_ARGUMENTS', 'Input validation failed: supply either {envelope} alone or ' +
-      '{conversation_id, message, working_dir?, request_id?, timeout_ms?}. Unknown keys, mixed modes, invalid types ' +
+      '{conversation_id, message, attachments?, working_dir?, request_id?, timeout_ms?}. Unknown keys, mixed modes, invalid types ' +
       'and values outside the advertised schema are rejected. ' + result.error.message);
   }
   return Object.hasOwn(result.data, 'envelope') ? parseEnvelope(result.data.envelope) : result.data;

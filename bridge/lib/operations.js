@@ -9,6 +9,7 @@ const paths = require('./paths');
 const path = require('node:path');
 const store = require('./store');
 const replyArtifacts = require('./reply-artifacts');
+const requestArtifacts = require('./request-artifacts');
 
 function failure(code, message) {
   return Object.assign(new Error(message), { code });
@@ -56,6 +57,7 @@ async function load(conversationId) {
         throw new Error('invalid operation or discontinuous history');
       }
       ids.add(op.operation_id);
+      requestArtifacts.assertMetadata(conversationId, op);
       if (op.request_id !== null) {
         if (requests.has(op.request_id)) throw new Error('duplicate request_id');
         requests.add(op.request_id);
@@ -105,11 +107,13 @@ async function findReplay(journal, requestId, input) {
 }
 
 async function ensureReply(conversationId, journal, op) {
+  const requests = await requestArtifacts.ensure(conversationId, op);
   const descriptor = await replyArtifacts.ensure(conversationId, op);
   // Completed journals from older versions gain an artifact without a new backend turn,
   // transcript entry or state rewind. Failed local upgrades are safe to repeat.
-  if (op.result.reply_artifact === undefined) {
+  if (op.result.reply_artifact === undefined || op.result.request_artifacts === undefined) {
     op.result.reply_artifact = descriptor;
+    op.result.request_artifacts = requests;
     await save(conversationId, journal);
   }
   return structuredClone(op.result);
@@ -130,6 +134,10 @@ async function begin(conversationId, journal, before, input, requestId) {
     operation_id: crypto.randomUUID(), request_id: requestId ?? null, status: 'pending',
     created_at: new Date().toISOString(), input, before,
   });
+  // Publish request bytes before the intent and any backend call. A publication
+  // failure may leave an immutable orphan but no durable pending intent or turn;
+  // a crash after the intent retains the normal fail-closed pending semantics.
+  await requestArtifacts.ensure(conversationId, journal.operations.at(-1));
   await save(conversationId, journal); // MUST finish before any backend side effect.
   return journal;
 }
@@ -140,7 +148,7 @@ function transcriptEntry(op, direction) {
     direction, operation_id: op.operation_id, request_id: op.request_id,
     turn: (op.before?.turn || 0) + 1,
     thread_id: direction === 'in' ? op.before?.thread_id || null : op.result.thread_id,
-    message: direction === 'in' ? op.input.message : op.result.reply,
+    message: direction === 'in' ? requestArtifacts.render(op.input) : op.result.reply,
     provider: op.input.provider,
   };
 }
@@ -152,6 +160,7 @@ async function receive(conversationId, journal, result) {
   op.received_at = ts;
   op.result = result;
   op.result.reply_artifact = replyArtifacts.describe(conversationId, op);
+  op.result.request_artifacts = requestArtifacts.describe(conversationId, op);
   op.after = {
     ...(op.before?.legacy_migration ? { legacy_migration: op.before.legacy_migration } : {}),
     conversation_id: conversationId, thread_id: result.thread_id, turn: result.turn,

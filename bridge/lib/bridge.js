@@ -10,6 +10,8 @@ const paths = require('./paths');
 const operations = require('./operations');
 const workingDir = require('./working-dir');
 const fsp = require('node:fs/promises');
+const { MAX_MESSAGE_LENGTH } = require('./turn-input');
+const requestArtifacts = require('./request-artifacts');
 
 // Read the owner metadata from a lock dir (mirrors lock.js#readLockMeta without re-exporting it).
 async function readLockMeta(dir) {
@@ -53,8 +55,8 @@ class CodexBridge {
       throw e;
     }
     // MAJOR-10 (defence-in-depth): reject oversized messages before touching disk or the backend.
-    // The primary limit is the Zod maxLength(100000) in index.js; this guard covers direct callers.
-    const MAX_MESSAGE_LENGTH = 100000;
+    // The primary limit is structured validation/envelope parsing in turn-input.js;
+    // this guard covers direct callers. All three limit only the caller's template.
     if (message.length > MAX_MESSAGE_LENGTH) {
       const e = new Error(
         `message exceeds maximum length of ${MAX_MESSAGE_LENGTH} characters (got ${message.length}).`
@@ -63,6 +65,7 @@ class CodexBridge {
       throw e;
     }
 
+    requestArtifacts.assertInput(message, opts.attachments);
     lock.ensureStateDirSync(paths.stateDir());
     const lockDirPath = paths.lockDir(conversationId);
     // lock.js requires timeoutMs/staleMs >= the backend call budget. Derive them from THIS
@@ -106,6 +109,11 @@ class CodexBridge {
           ? { message, provider: this.provider, working_dir_policy: 'pinned', working_dir: opts.working_dir === undefined
             ? recorded.input.working_dir : await workingDir.normalize(opts.working_dir, this.defaultWorkingDir) }
           : { message, provider: this.provider, working_dir: opts.working_dir ?? null };
+        if (opts.attachments?.length && recorded.input.working_dir_policy !== 'pinned') {
+          throw Object.assign(new Error('request_id was already used without attachments.'), { code: 'REQUEST_ID_CONFLICT' });
+        }
+        const replayAttachments = await requestArtifacts.forReplay(message, opts.attachments, recorded.input);
+        if (replayAttachments !== undefined) replayInput.attachments = replayAttachments;
         const replay = await operations.findReplay(journal, opts.request_id, replayInput);
         if (replay) return replay;
       }
@@ -119,6 +127,11 @@ class CodexBridge {
       }
       const cwd = await workingDir.forTurn(directoryState, opts.working_dir, this.defaultWorkingDir);
       const input = { message, working_dir: cwd, working_dir_policy: 'pinned', provider: this.provider };
+      const attachments = await requestArtifacts.prepare(message, opts.attachments, cwd);
+      if (attachments !== undefined) input.attachments = attachments;
+      // Caller message checks have already passed. Code-inserted UTF-8 file content
+      // is outside that 100000-unit domain; never recheck the rendered prompt.
+      const prompt = requestArtifacts.render(input);
       const isNew = !prior || !prior.thread_id;
       const turnNumber = (prior && Number.isInteger(prior.turn) ? prior.turn : 0) + 1;
 
@@ -133,9 +146,9 @@ class CodexBridge {
         if (lockMeta && lockMeta.token) startHeartbeat(lockMeta.token);
 
         if (isNew) {
-          result = await this.backend.startSession(message, { cwd, ...(opts.timeout_ms ? { timeoutMs: opts.timeout_ms } : {}), ...(opts.signal ? { signal: opts.signal } : {}) });
+          result = await this.backend.startSession(prompt, { cwd, ...(opts.timeout_ms ? { timeoutMs: opts.timeout_ms } : {}), ...(opts.signal ? { signal: opts.signal } : {}) });
         } else {
-          result = await this.backend.continueSession(prior.thread_id, message, { cwd, ...(opts.timeout_ms ? { timeoutMs: opts.timeout_ms } : {}), ...(opts.signal ? { signal: opts.signal } : {}) });
+          result = await this.backend.continueSession(prior.thread_id, prompt, { cwd, ...(opts.timeout_ms ? { timeoutMs: opts.timeout_ms } : {}), ...(opts.signal ? { signal: opts.signal } : {}) });
         }
       } catch (err) {
         // LOUD failure. We do NOT fall back to a fresh session on a resume failure.

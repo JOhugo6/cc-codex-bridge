@@ -103,6 +103,8 @@ Příklady níže jsou pseudokód. Nejdřív vytvoř/spusť teammate a používe
 
 Pro přesné diffy/kód zachovej přímý MCP výsledek: `reply_artifact` nabízí neměnné UTF-8 resource URI, SHA-256, délku bajtů a identitu tahu. Načti jej přes `resources/read` a ověř dekódované bajty kódem; próza relaye je best effort. Viz [přesné načtení odpovědi](docs/runbook.md#přesné-bajty-odpovědi-a-mcp-resources).
 
+Pro přesné **vstupní** bajty volej strukturovaný `codex_turn` s `attachments: [{id, path, expected_sha256?}]` a právě jedním `{{attachment:<id>}}` v `message` pro každou přílohu. Bridge soubor uvnitř uloženého `working_dir` jednou načte, ověří UTF-8, spočítá SHA-256 a vloží celý obsah bez změny BOM, whitespace nebo konců řádků. Výsledek `request_artifacts` uvádí kanonickou cestu, digest, délku a identitu operace. Limit 100000 UTF-16 jednotek nadále platí pro zprávu volajícího před vložením souborů; velikost příloh bridge neomezuje. Text přepsaný modelem do `message` nemá bajtovou záruku. Obálka zůstává jedním neprůhledným řetězcem; přílohy používej přímým strukturovaným voláním. Viz [vstupní bajty a obnova](docs/runbook.md#přesné-vstupní-bajty-a-přílohy).
+
 ```python
 # Příklad: orchestrátor posílá zprávu codex-peer
 SendMessage(to="codex-peer", message="""CONV_ID: sprint42--arch-review
