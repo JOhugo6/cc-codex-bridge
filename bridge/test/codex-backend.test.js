@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const { CodexBackend, pickCommand } = require('../lib/codex-backend');
+const { CodexBackend, pickCommand, MAX_THREAD_LOADS_PER_TRANSPORT } = require('../lib/codex-backend');
 const { CodexBridge } = require('../lib/bridge');
 const store = require('../lib/store');
 const operations = require('../lib/operations');
@@ -18,7 +18,7 @@ function setup(t, mode = 'normal', options = {}) {
   config(mode, options);
   const make = () => new CodexBackend({ command: process.execPath,
     args: [path.join(__dirname, 'app-server-stub.js'), dir], cwd: dir,
-    readinessTimeoutMs: 2000, callTimeoutMs: 4000, interruptTimeoutMs: 300, ...options });
+    readinessTimeoutMs: 10000, callTimeoutMs: 15000, interruptTimeoutMs: 300, ...options });
   const backends = [];
   const backend = () => { const b = make(); backends.push(b); return b; };
   const wire = () => fs.readFileSync(path.join(dir, 'wire.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
@@ -28,7 +28,7 @@ function setup(t, mode = 'normal', options = {}) {
 const exact = '  žluťoučký 😀\r\n```diff\r\n+ exact\t \r\n```\r\n';
 function dead(pid) { assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }); }
 async function until(check) {
-  const end = Date.now() + 4000;
+  const end = Date.now() + 15000;
   while (!check()) {
     assert.ok(Date.now() < end, 'timed out waiting for child checkpoint');
     await new Promise((r) => setTimeout(r, 10));
@@ -42,7 +42,8 @@ for (const mode of ['normal', 'early-events', 'terminal-items-only', 'event-item
     assert.equal(out.content, exact);
     assert.equal((await b.continueSession(out.threadId, 'recall', { cwd: env.project })).content, 'token');
     const methods = env.wire().filter((x) => x.method).map((x) => x.method);
-    assert.deepEqual(methods, ['initialize', 'initialized', 'thread/start', 'turn/start', 'thread/read', 'thread/resume', 'turn/start']);
+    assert.deepEqual(methods, ['initialize', 'initialized', 'thread/start', 'turn/start', 'thread/unsubscribe',
+      'thread/read', 'thread/resume', 'turn/start', 'thread/unsubscribe']);
   });
 }
 
@@ -73,15 +74,17 @@ for (const [mode, code] of [
 
 for (const mode of ['silent-init', 'bad-init', 'invalid-json']) {
   test(`JSONL ${mode}: bounded failed handshake cleans parent and descendant`, async (t) => {
-    const env = setup(t, mode, { readinessTimeoutMs: 1000, descendant: true });
+    const env = setup(t, mode, { readinessTimeoutMs: 10000, descendant: true });
     await assert.rejects(env.backend().startSession('test'), { code: 'BACKEND_NOT_READY' });
     for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
   });
 }
 
 test('turn timeout sends interrupt, reaps tree and reconnects without retrying uncertain turn', async (t) => {
-  const env = setup(t, 'hang', { callTimeoutMs: 1200, descendant: true }); const b = env.backend();
-  await assert.rejects(b.startSession('test', { cwd: env.project }), { code: 'TIMEOUT' });
+  const env = setup(t, 'hang', { descendant: true }); const b = env.backend();
+  // Warm only the transport so the short budget tests the turn, not PowerShell startup.
+  await b._serial(async () => {});
+  await assert.rejects(b.startSession('test', { cwd: env.project, timeoutMs: 300 }), { code: 'TIMEOUT' });
   assert.equal(env.wire().filter((x) => x.method === 'turn/interrupt').length, 1);
   for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
   env.config('normal');
@@ -167,9 +170,12 @@ test('explicit executable launch accepts spaces and never invokes a shell', () =
 });
 
 test('native turn timeout leaves durable pending intent and forbids automatic retry/reconnect for that conversation', async (t) => {
-  const env = setup(t, 'hang', { callTimeoutMs: 1200 }); process.env.CODEX_BRIDGE_STATE_DIR = env.dir;
+  const env = setup(t, 'hang'); process.env.CODEX_BRIDGE_STATE_DIR = env.dir;
   t.after(() => { delete process.env.CODEX_BRIDGE_STATE_DIR; });
-  const bridge = new CodexBridge(env.backend());
+  const backend = env.backend();
+  await backend._serial(async () => {});
+  backend._callTimeoutMs = 300;
+  const bridge = new CodexBridge(backend);
   await assert.rejects(bridge.turn('uncertain', 'first', { request_id: 'r1' }), { code: 'TIMEOUT' });
   assert.equal((await operations.load('uncertain')).operations[0].status, 'pending');
   env.config('normal'); const before = env.wire().length;
@@ -271,6 +277,7 @@ test('per-call timeout overrides the instance default in both directions', async
   // A short per-call budget must fire against a hung backend even though the instance
   // default is long, proving the caller's value is the one actually enforced.
   const env = setup(t, 'hang', { callTimeoutMs: 600000, descendant: true }); const b = env.backend();
+  await b._serial(async () => {});
   const started = Date.now();
   await assert.rejects(b.startSession('test', { cwd: env.project, timeoutMs: 900 }), { code: 'TIMEOUT' });
   assert.ok(Date.now() - started < 60000, 'the per-call budget, not the instance default, bounded the call');
@@ -289,4 +296,125 @@ test('a malformed per-call timeout is rejected before any backend work', async (
   // The stub only creates the wire log once it is spoken to, so its absence is the proof
   // that a malformed budget never reached the backend at all.
   assert.equal(fs.existsSync(path.join(env.dir, 'wire.jsonl')), false);
+});
+
+for (const mode of ['unsubscribe-error', 'unsubscribe-hang', 'unsubscribe-disconnect']) {
+  test(`${mode}: successful reply is durable, cleanup is bounded and its tree is retired`, async (t) => {
+    const env = setup(t, mode, { descendant: true }); const b = env.backend();
+    process.env.CODEX_BRIDGE_STATE_DIR = env.dir;
+    t.after(() => { delete process.env.CODEX_BRIDGE_STATE_DIR; });
+    const bridge = new CodexBridge(b);
+    const before = Date.now();
+    const out = await bridge.turn('cleanup', 'remember', { request_id: 'r1', working_dir: env.project });
+    assert.ok(Date.now() - before < 15000, 'cleanup must not hang a completed response');
+    assert.equal(out.reply, exact);
+    assert.equal((await operations.load('cleanup')).operations[0].status, 'completed');
+    assert.equal(env.wire().filter((x) => x.method === 'thread/unsubscribe').length, 1);
+    for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
+    const calls = env.wire().length;
+    assert.deepEqual(await bridge.turn('cleanup', 'remember', { request_id: 'r1', working_dir: env.project }), out);
+    assert.equal(env.wire().length, calls, 'redelivery must not replay inference or cleanup');
+    env.config('normal');
+    const next = await bridge.turn('cleanup', 'recall', { request_id: 'r2' });
+    assert.equal(next.thread_id, out.thread_id);
+    assert.equal(next.reply, 'remember');
+    assert.equal(env.wire().filter((x) => x.method === 'thread/start').length, 1);
+    assert.equal(env.wire().filter((x) => x.method === 'initialize').length, 2);
+  });
+}
+
+test('completed inference survives its original timeout and cancellation during cleanup; queued caller waits', async (t) => {
+  const env = setup(t, 'unsubscribe-hang', { interruptTimeoutMs: 400, descendant: true }); const b = env.backend();
+  await b._serial(async () => {});
+  const abort = new AbortController();
+  const out = b.startSession('memory', { timeoutMs: 150, signal: abort.signal });
+  await until(() => env.wire().some((x) => x.method === 'thread/unsubscribe'));
+  abort.abort();
+  const next = b.continueSession('thread-1', 'recall');
+  assert.equal((await out).content, exact);
+  const firstPid = env.wire()[0].pid; dead(firstPid);
+  assert.equal((await next).content, 'memory');
+  assert.equal(env.wire().filter((x) => x.method === 'turn/interrupt').length, 0);
+  assert.equal(env.wire().filter((x) => x.method === 'thread/unsubscribe').length, 2);
+  assert.equal(env.wire().filter((x) => x.method === 'initialize').length, 2);
+});
+
+test('finite default counts resumes and new threads, excludes metadata reads, and reaps before queued replacement', async (t) => {
+  assert.equal(MAX_THREAD_LOADS_PER_TRANSPORT, 8);
+  const env = setup(t, 'normal', { descendant: true }); const b = env.backend();
+  const first = await b.startSession('persistent memory', { cwd: env.project });
+  for (let i = 1; i < 8; i++) {
+    assert.equal(await b.getThreadWorkingDir(first.threadId), await fsp.realpath(env.project));
+    assert.equal((await b.continueSession(first.threadId, 'recall')).content, 'persistent memory');
+    assert.equal(env.wire().filter((x) => x.method === 'initialize').length, 1);
+  }
+  assert.equal(b._transport, null, 'eighth load retires immediately even with successful unsubscribe');
+  for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
+  const outputs = await Promise.all([
+    ...Array.from({ length: 7 }, (_, i) => b.startSession(`conversation ${i}`)),
+    b.continueSession(first.threadId, 'recall'),
+  ]);
+  assert.equal(outputs.at(-1).threadId, first.threadId);
+  assert.equal(outputs.at(-1).content, 'persistent memory');
+  assert.equal(new Set(outputs.map((out) => out.threadId)).size, 8);
+  assert.equal(b._transport, null);
+  const wire = env.wire();
+  assert.equal(wire.filter((x) => x.method === 'initialize').length, 2);
+  assert.equal(wire.filter((x) => x.method === 'thread/unsubscribe').length, 16);
+  for (const row of wire) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
+  const turnMethods = wire.filter((x) => ['thread/start', 'thread/resume', 'turn/start', 'thread/unsubscribe'].includes(x.method));
+  for (let i = 0; i < turnMethods.length; i += 3) {
+    assert.ok(['thread/start', 'thread/resume'].includes(turnMethods[i].method));
+    assert.equal(turnMethods[i + 1].method, 'turn/start');
+    assert.equal(turnMethods[i + 2].method, 'thread/unsubscribe');
+  }
+});
+
+test('failed retirement preserves completed response and prevents reuse or overlapping successor tree', async (t) => {
+  const env = setup(t, 'unsubscribe-error'); const b = env.backend();
+  await b._serial(async () => {});
+  const conn = b._transport;
+  const patch = t.mock.method(conn, 'close', async () => {
+    throw Object.assign(new Error('injected close failure'), { code: 'BACKEND_CLEANUP_FAILED' });
+  });
+  try {
+    assert.equal((await b.startSession('memory')).content, exact);
+    assert.equal(b._transport, conn);
+    await assert.rejects(b.startSession('must not start'), { code: 'BACKEND_CLEANUP_FAILED' });
+    assert.equal(env.wire().filter((x) => x.method === 'initialize').length, 1);
+    assert.equal(env.wire().filter((x) => x.method === 'turn/start').length, 1);
+  } finally { patch.mock.restore(); }
+});
+
+test('late unwind of a timed-out action cannot clear the successor active turn', async (t) => {
+  const env = setup(t, 'hang'); const b = env.backend();
+  await b._serial(async () => {});
+  const oldConn = b._transport;
+  const workingDir = require('../lib/working-dir');
+  const normalize = workingDir.normalize;
+  let unblock, normalizationEntered, lateTurnAttempt;
+  const gate = new Promise((r) => { unblock = r; });
+  const entered = new Promise((r) => { normalizationEntered = r; });
+  const attempted = new Promise((r) => { lateTurnAttempt = r; });
+  let normalizations = 0;
+  const patch = t.mock.method(workingDir, 'normalize', async (...args) => {
+    const result = await normalize(...args);
+    if (++normalizations === 2) { normalizationEntered(); await gate; }
+    return result;
+  });
+  const request = oldConn.request.bind(oldConn);
+  t.mock.method(oldConn, 'request', (method, params) => {
+    if (method === 'turn/start') lateTurnAttempt();
+    return request(method, params);
+  });
+  const first = assert.rejects(b.startSession('old', { timeoutMs: 300 }), { code: 'TIMEOUT' });
+  await entered; await first; patch.mock.restore();
+  const abort = new AbortController();
+  const second = assert.rejects(b.startSession('new', { signal: abort.signal }), { code: 'CANCELLED' });
+  await until(() => env.wire().some((x) => x.method === 'turn/start'));
+  unblock(); await attempted;
+  abort.abort(); await second;
+  assert.equal(env.wire().filter((x) => x.method === 'turn/interrupt').length, 1);
+  assert.equal(env.wire().find((x) => x.method === 'turn/interrupt').params.threadId, 'thread-2');
+  assert.equal(env.wire().filter((x) => x.method === 'thread/unsubscribe').length, 0);
 });

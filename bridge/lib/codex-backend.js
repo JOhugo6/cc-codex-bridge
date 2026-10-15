@@ -51,6 +51,8 @@ function pickCommand(overrideCommand, overrideArgs) {
 const MIN_CALL_TIMEOUT_MS = 60000;
 const DEFAULT_CALL_TIMEOUT_MS = 1800000;
 const MAX_CALL_TIMEOUT_MS = 3600000;
+// Count loads, including repeated resumes: unsubscribing need not unload immediately.
+const MAX_THREAD_LOADS_PER_TRANSPORT = 8;
 
 function assertCallTimeout(value) {
   if (!Number.isInteger(value) || value <= 0) {
@@ -67,7 +69,6 @@ function requireId(value, code, label) {
 class CodexBackend {
   constructor(opts = {}) {
     this._transport = null;
-    this._active = null;
     this._closed = false;
     this._callMutexTail = Promise.resolve();
     this._callTimeoutMs = assertCallTimeout(opts.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS);
@@ -90,14 +91,26 @@ class CodexBackend {
     finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
   }
 
-  async _ensureConnected() {
-    if (this._transport && !this._transport.error) return this._transport;
-    if (this._transport) await this._transport.close();
+  async _retire(conn) {
+    conn.retired = true;
+    // Keep the reference on failure. A failed close must block replacement, otherwise
+    // the old owned tree could coexist with a fresh one indefinitely.
+    await conn.close();
+    if (this._transport === conn) this._transport = null;
+  }
+
+  async _ensureConnected(scope) {
+    scope.conn = this._transport;
+    if (this._transport && !this._transport.error && !this._transport.retired) return this._transport;
+    if (this._transport) await this._retire(this._transport);
+    if (scope.stopped) throw failure('CANCELLED', 'Codex request stopped before connection.');
     if (this._closed) throw failure('BACKEND_CLOSED', 'Codex backend is closed.');
     const picked = pickCommand(this._overrideCommand, this._overrideArgs);
     const conn = new AppServerTransport(picked.command, picked.args, this._cwd);
     this._transport = conn;
+    scope.conn = conn;
     conn.finishedTurns = new Set();
+    conn.threadLoads = 0;
     try {
       const result = await this._bounded(conn.request('initialize', {
         clientInfo: { name: 'codex-bridge', title: 'Codex Bridge', version: '1.0.0' },
@@ -111,28 +124,40 @@ class CodexBackend {
     }
   }
 
-  _serial(action, signal, timeoutMs) {
+  _serial(action, signal, timeoutMs, afterSuccess) {
     const queued = this._callMutexTail.then(async () => {
       // Validate inside the queued task: every other failure on this path is a rejected
       // promise, and a synchronous throw here would need different handling by callers.
       const callTimeoutMs = timeoutMs === undefined ? this._callTimeoutMs : assertCallTimeout(timeoutMs);
       if (this._closed) throw failure('BACKEND_CLOSED', 'Codex backend is closed.');
       if (signal?.aborted) throw failure('CANCELLED', 'Codex request cancelled.');
+      const scope = { conn: null, stopped: false };
+      let result;
       try {
-        return await this._bounded((async () => action(await this._ensureConnected()))(), callTimeoutMs, signal);
+        result = await this._bounded((async () => {
+          const conn = await this._ensureConnected(scope);
+          if (scope.stopped) throw failure('CANCELLED', 'Codex request stopped before inference.');
+          return action(conn);
+        })(), callTimeoutMs, signal);
       } catch (err) {
-        const conn = this._transport;
+        scope.stopped = true;
+        const conn = scope.conn;
         if (conn) {
           // An interrupt is best effort, never evidence that an uncertain turn is safe to retry.
-          if (this._active?.turnId && !conn.error) {
+          if (conn.activeTurn?.turnId && !conn.error) {
             await this._bounded(conn.request('turn/interrupt', {
-              threadId: this._active.threadId, turnId: this._active.turnId,
+              threadId: conn.activeTurn.threadId, turnId: conn.activeTurn.turnId,
             }), this._interruptTimeoutMs).catch(() => {});
           }
           await conn.close(err);
         }
         throw err;
-      } finally { this._active = null; }
+      } finally { if (scope.conn) scope.conn.activeTurn = null; }
+      // Inference is now definitive. Its timeout/cancellation must not race cleanup
+      // and turn a completed reply into uncertain journal state. Hold the mutex until
+      // this captured transport has finished cleanup; never operate on its successor.
+      if (afterSuccess) await afterSuccess(scope.conn, result);
+      return result;
     });
     this._callMutexTail = queued.catch(() => {});
     return queued;
@@ -168,6 +193,7 @@ class CodexBackend {
         cwd, approvalPolicy: 'never', sandbox: 'danger-full-access',
         ...(extra.model ? { model: extra.model } : {}),
       });
+      conn.threadLoads++;
       const threadId = requireId(result?.thread?.id, priorThreadId ? 'NO_THREAD_ID_ON_RESUME' : 'NO_THREAD_ID', 'thread id');
       if (priorThreadId && threadId !== priorThreadId) throw failure('THREAD_ID_DRIFT', 'thread/resume returned a different thread id.');
       if (typeof result.cwd !== 'string' || !path.isAbsolute(result.cwd) || await workingDir.normalize(result.cwd, this._cwd) !== cwd) {
@@ -177,12 +203,27 @@ class CodexBackend {
         throw failure('BACKEND_POLICY_MISMATCH', 'App Server did not confirm full-access sandbox and approval never.');
       }
       return this._turn(conn, threadId, prompt, cwd);
-    }, extra.signal, extra.timeoutMs);
+    }, extra.signal, extra.timeoutMs, (conn, result) => this._releaseThread(conn, result.threadId));
+  }
+
+  async _releaseThread(conn, threadId) {
+    let retire = conn.threadLoads >= MAX_THREAD_LOADS_PER_TRANSPORT;
+    try {
+      await this._bounded(conn.request('thread/unsubscribe', { threadId }), this._interruptTimeoutMs);
+    } catch {
+      // Older CLIs may not implement unsubscribe. Hung/disconnected cleanup also
+      // retires the owned tree, without replaying or invalidating the completed turn.
+      retire = true;
+    }
+    if (retire) {
+      try { await this._retire(conn); }
+      catch { /* preserve the reply; the retained retired transport blocks new calls */ }
+    }
   }
 
   async _turn(conn, threadId, prompt, cwd) {
     const ctx = { threadId, turnId: null, early: [], items: new Map(), terminal: null };
-    this._active = ctx;
+    conn.activeTurn = ctx;
     let finish, fail;
     const completed = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
     // Events/errors may arrive before the turn/start response.
@@ -252,4 +293,5 @@ class CodexBackend {
 module.exports = {
   CodexBackend, pickCommand,
   MIN_CALL_TIMEOUT_MS, DEFAULT_CALL_TIMEOUT_MS, MAX_CALL_TIMEOUT_MS,
+  MAX_THREAD_LOADS_PER_TRANSPORT,
 };

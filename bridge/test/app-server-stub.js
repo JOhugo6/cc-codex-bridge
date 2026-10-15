@@ -41,6 +41,15 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', (l
     answer({ thread: { id: mode === 'read-drift' ? 'wrong-thread' : p.threadId,
       cwd: mode === 'read-no-cwd' ? null : mode === 'read-missing-dir' ? path.join(dir, 'missing') : db[p.threadId].cwd } }); return;
   }
+  if (req.method === 'thread/unsubscribe') {
+    assert.equal(busy, false, 'unsubscribe must follow completed inference');
+    assert.ok(db[p.threadId], 'unsubscribe must name a persisted thread');
+    if (mode === 'unsubscribe-error') { rpcError('unsupported thread/unsubscribe'); return; }
+    if (mode === 'unsubscribe-hang') return;
+    if (mode === 'unsubscribe-disconnect') { process.exit(7); return; }
+    if (mode === 'unsubscribe-delay') { setTimeout(() => answer({}), 200); return; }
+    answer({}); return;
+  }
   if (req.method === 'thread/start' || req.method === 'thread/resume') {
     assert.equal(p.approvalPolicy, 'never'); assert.equal(p.sandbox, 'danger-full-access');
     assert.ok(path.isAbsolute(p.cwd));
