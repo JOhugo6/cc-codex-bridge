@@ -144,9 +144,10 @@ class CodexBackend {
         const conn = scope.conn;
         if (conn) {
           // An interrupt is best effort, never evidence that an uncertain turn is safe to retry.
-          if (conn.activeTurn?.turnId && !conn.error) {
+          const interruptTurnId = conn.activeTurn?.turnId || conn.activeTurn?.startedTurnId;
+          if (interruptTurnId && !conn.error) {
             await this._bounded(conn.request('turn/interrupt', {
-              threadId: conn.activeTurn.threadId, turnId: conn.activeTurn.turnId,
+              threadId: conn.activeTurn.threadId, turnId: interruptTurnId,
             }), this._interruptTimeoutMs).catch(() => {});
           }
           await conn.close(err);
@@ -222,7 +223,7 @@ class CodexBackend {
   }
 
   async _turn(conn, threadId, prompt, cwd) {
-    const ctx = { threadId, turnId: null, early: [], items: new Map(), terminal: null };
+    const ctx = { threadId, turnId: null, startedTurnId: null, early: [], items: new Map(), terminal: null };
     conn.activeTurn = ctx;
     let finish, fail;
     const completed = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
@@ -243,6 +244,10 @@ class CodexBackend {
       if (p?.threadId !== threadId) throw failure('THREAD_ID_DRIFT', 'App Server event belongs to a different thread.');
       requireId(eventTurnId, 'BACKEND_PROTOCOL_ERROR', 'event turn id');
       if (!ctx.turnId) {
+        // A caller can cancel after the server announces the turn but before its
+        // response arrives. Retain that validated identity for best-effort interrupt;
+        // response matching and all event processing still happen below as usual.
+        if (method === 'turn/started') ctx.startedTurnId = eventTurnId;
         if (ctx.early.length >= 10000) throw failure('BACKEND_PROTOCOL_ERROR', 'Too many events before turn/start response.');
         ctx.early.push({ method, params: p }); return;
       }

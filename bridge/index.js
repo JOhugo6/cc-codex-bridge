@@ -17,6 +17,18 @@ const { CodexBackend } = require('./lib/codex-backend');
 const { parseToolInput, inputJsonSchema, errorResult } = require('./lib/turn-input');
 const replyArtifacts = require('./lib/reply-artifacts');
 
+// Claude rejects top-level oneOf/anyOf/allOf in tool schemas. Publish the existing
+// field definitions as a plain object; the strict runtime union in parseToolInput
+// still enforces required fields and exclusive modes before any bridge operation.
+const advertisedInputSchema = {
+  type: 'object',
+  description: 'Supply either envelope alone, or conversation_id and message with optional ' +
+    'attachments, working_dir, request_id and timeout_ms. Never mix the two modes. ' +
+    'The server rejects missing required fields, mixed modes and unknown arguments.',
+  properties: Object.assign({}, ...inputJsonSchema.oneOf.map((schema) => schema.properties)),
+  additionalProperties: false,
+};
+
 function elog(...args) {
   process.stderr.write('[codex-bridge] ' + args.map(String).join(' ') + '\n');
 }
@@ -99,7 +111,7 @@ async function main() {
     }).describe('Immutable UTF-8 reply resource with code-computed SHA-256, byte length and turn identity.'),
   });
   // The low-level SDK handlers let validation errors use the same single-line format as
-  // backend errors, and advertise both strict input alternatives without SDK union coercion.
+  // backend errors, while publishing a Claude-compatible object schema.
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [{
       name: 'codex_turn',
@@ -114,7 +126,7 @@ async function main() {
         'UTF-8 files inside the pinned working_dir and replaces exactly one {{attachment:<id>}} per id in message. ' +
         'Model-transcribed message text has no byte guarantee. For exact output bytes, read reply_artifact.uri ' +
         'and verify its SHA-256 and byte length in code; LLM relay prose has no byte guarantee.',
-      inputSchema: inputJsonSchema,
+      inputSchema: advertisedInputSchema,
       outputSchema: z.toJSONSchema(outputSchema),
     }],
   }));

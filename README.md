@@ -23,7 +23,8 @@ Jiný Claude sub-agent
 | Node.js | v20 | `node --version` |
 | Claude Code CLI | ověřeno native 2.1.126 | viz limity režimů/verzí níže; modelové tahy vyžadují přihlášení |
 | OpenAI Codex CLI | v0.153.4+ (chování ověřeno na 0.155.1) | `codex --version`, musí být autentizováno |
-| PowerShell | Windows 5.1 nebo 7 | instalátor; vestavěný 5.1 + Add-Type pro backend |
+| PowerShell (pouze Windows) | Windows 5.1 nebo 7 | instalátor; vestavěný 5.1 + Add-Type pro backend |
+| POSIX sh (pouze Linux) | `/bin/sh` | `install.sh`; nativní Linux Node, npm, Claude a Codex v `PATH` |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `=1` | jen pro experimentální teammate; běžný subagent jej nepotřebuje |
 | `MCP_TOOL_TIMEOUT` | `=3600000` | **jinak se dlouhé tahy useknou na straně klienta** — viz níže |
 
@@ -34,6 +35,19 @@ git clone https://github.com/JOhugo6/cc-codex-bridge
 cd cc-codex-bridge
 .\install.ps1
 ```
+
+Na Linuxu použij ze stejného checkoutu POSIX instalátor:
+
+```sh
+sh install.sh
+# Izolovaná instalace (cesty mohou obsahovat mezery):
+sh install.sh --claude-config-dir "$HOME/Claude bridge config"
+CLAUDE_CONFIG_DIR="$HOME/Claude bridge config" claude
+```
+
+`--claude-config-dir` má přednost před proměnnou `CLAUDE_CONFIG_DIR`. Bez obou se bridge a agent instalují pod `~/.claude`, registrace zůstává v obvyklém `~/.claude.json`. Při explicitním adresáři je registrace v jeho `.claude.json` a stav v `state/codex-bridge`. Instalátor vyžaduje nativní Linux Node >=20, npm a příkazy `claude` a `codex`; Windows executable přes WSL nepoužívej. PowerShell na Linuxu není potřeba.
+
+Po `git pull` spusť znovu `sh install.sh` se stejným adresářem. Aktualizace přepíše spravované zdroje a agenta, provede `npm ci` a skutečné MCP `initialize`/`tools/list`. Nekopíruje lokální stav ani `node_modules` z checkoutu a nemaže ostatní cílové soubory. Ověření nevolá model ani nekontroluje přihlášení Codexu. [Linux provoz a ověření](docs/runbook.md#linux) rozlišuje deterministické testy a živé tahy.
 
 Poté **restartuj Claude Code** (definice agentů se cachují při startu session).
 

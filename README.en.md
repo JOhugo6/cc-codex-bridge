@@ -23,7 +23,8 @@ Other Claude sub-agent
 | Node.js | v20 | `node --version` |
 | Claude Code CLI | native 2.1.126 tested | see mode/version limits below; model calls require login |
 | OpenAI Codex CLI | v0.153.4+ (behaviour verified on 0.155.1) | `codex --version`, must be authenticated |
-| PowerShell | Windows 5.1 or 7 | installer; built-in 5.1 + Add-Type for backend |
+| PowerShell (Windows only) | Windows 5.1 or 7 | installer; built-in 5.1 + Add-Type for backend |
+| POSIX sh (Linux only) | `/bin/sh` | `install.sh`; native Linux Node, npm, Claude and Codex on `PATH` |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `=1` | only for experimental teammates; ordinary subagents work without it |
 | `MCP_TOOL_TIMEOUT` | `=3600000` | **without it the client cuts long turns short** - see below |
 
@@ -34,6 +35,19 @@ git clone https://github.com/JOhugo6/cc-codex-bridge
 cd cc-codex-bridge
 .\install.ps1
 ```
+
+On Linux, use the POSIX installer from the same checkout:
+
+```sh
+sh install.sh
+# Isolated installation (paths may contain spaces):
+sh install.sh --claude-config-dir "$HOME/Claude bridge config"
+CLAUDE_CONFIG_DIR="$HOME/Claude bridge config" claude
+```
+
+`--claude-config-dir` takes precedence over `CLAUDE_CONFIG_DIR`. With neither set, bridge and agent files go under `~/.claude` and registration uses the usual `~/.claude.json`. An explicit directory stores registration in its `.claude.json` and state in `state/codex-bridge`. The installer requires native Linux Node >=20, npm, and `claude` and `codex` on `PATH`; do not use Windows executables through WSL. Linux does not require PowerShell.
+
+After `git pull`, rerun `sh install.sh` with the same directory. Updates replace managed sources and the agent, run `npm ci`, and perform real MCP `initialize`/`tools/list`. They do not copy local state or `node_modules` from the checkout or delete unrelated destination files. Verification makes no model call and does not check Codex login. [Linux operation and verification](docs/runbook.en.md#linux) distinguishes deterministic tests from live turns.
 
 Then **restart Claude Code** (agent definitions are cached at session start).
 

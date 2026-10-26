@@ -157,6 +157,35 @@ test('missing migration destination and modified legacy transcript remain loud e
   await assert.rejects(store.loadState('changed-tx'), { code: 'LEGACY_IDENTITY_CONFLICT' });
 });
 
+test('migration reads legacy JSON only after acquiring its process lock', async (t) => {
+  const env = freshStateDir();
+  t.after(() => env.cleanup());
+  const legacy = await legacyFixture(env.dir, 'in-progress');
+  const legacyLock = path.join(env.dir, 'in-progress.lock');
+  const release = await lock.acquire(legacyLock);
+  t.after(release);
+  // A legacy writer may have truncated the file while it owns the mutex. Keep
+  // that intermediate state in place until migration reaches the same mutex.
+  await fsp.writeFile(legacy.stateFile, '');
+  let attempted;
+  const waiting = new Promise((resolve) => { attempted = resolve; });
+  const acquire = lock.acquire;
+  t.mock.method(lock, 'acquire', (...args) => {
+    if (args[0] === legacyLock) attempted({ waiting: true });
+    return acquire(...args);
+  });
+  const migration = migrateLegacy('in-progress');
+  const settled = migration.then(
+    () => ({ waiting: false, error: 'migration completed while the legacy mutex was held' }),
+    (error) => ({ waiting: false, error: `${error.code}: ${error.message}` }),
+  );
+  assert.deepEqual(await Promise.race([waiting, settled]), { waiting: true });
+  await fsp.writeFile(legacy.stateFile, JSON.stringify({ thread_id: 'legacy-thread', turn: 8 }));
+  await release();
+  assert.equal((await migration).migrated, true);
+  assert.equal((await store.loadState('in-progress')).turn, 8);
+});
+
 test('migration CLI waits for a legacy process lock and reads its final state', async (t) => {
   const env = freshStateDir();
   t.after(() => env.cleanup());
