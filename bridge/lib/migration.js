@@ -28,7 +28,7 @@ function digest(data) {
 }
 
 // Enumerate real names: fs.exists/readFile alone would hide case aliases on Windows.
-async function inspectLegacy(id) {
+async function locateLegacy(id) {
   paths.assertSafeConversationId(id);
   let names;
   try { names = await fsp.readdir(paths.stateDir()); }
@@ -41,13 +41,20 @@ async function inspectLegacy(id) {
   if (new Set(stems).size !== 1) throw conflict(id, 'Legacy state, transcript or lock have conflicting ID casing.');
   const legacyId = stems[0];
   const files = Object.fromEntries(['state', 'transcript', 'lock'].map((key, i) => [key, path.join(paths.stateDir(), `${legacyId}${suffixes[i]}`)]));
+  return { legacyId, files };
+}
+
+async function inspectLegacy(id) {
+  const legacy = await locateLegacy(id);
+  if (!legacy) return null;
+  const { files } = legacy;
   const raw = await readOptional(files.state);
   let data = null;
   if (raw !== null) {
     try { data = JSON.parse(raw.toString('utf8')); }
     catch { throw conflict(id, `Legacy state at ${files.state} is not valid JSON.`); }
   }
-  return { legacyId, files, raw, data };
+  return { ...legacy, raw, data };
 }
 
 async function validateMarker(id, legacy) {
@@ -85,7 +92,9 @@ async function migrateLegacy(id, opts = {}) {
   const release = await lock.acquire(paths.lockDir(id), opts.lockOpts);
   let releaseLegacy;
   try {
-    let legacy = await inspectLegacy(id);
+    // Discover casing and the mutex path without reading a state file that the
+    // legacy holder may currently be truncating or rewriting.
+    let legacy = await locateLegacy(id);
     if (!legacy) throw migrationError('NO_LEGACY_STATE', id, 'No legacy files exist.');
     if (legacy.legacyId !== id) throw conflict(id, `Use the exact legacy ID '${legacy.legacyId}'.`);
     releaseLegacy = await lock.acquire(legacy.files.lock, opts.lockOpts);

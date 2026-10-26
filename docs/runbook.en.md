@@ -14,10 +14,49 @@
 
 ## 1. Prerequisites and connection checks
 
-Read [Claude modes, installation and diagnostics](claude-modes.en.md) first. It distinguishes ordinary subagent, main `--agent`, in-process teammate and split-pane teammate, including tested versions. Agent Teams is only required for teammate mode. Install native Node 20+, native Claude CLI, authenticated Codex CLI and Windows PowerShell 5.1 with Add-Type support; install.ps1 also runs under PowerShell 7.
+Read [Claude modes, installation and diagnostics](claude-modes.en.md) first. It distinguishes ordinary subagent, main `--agent`, in-process teammate and split-pane teammate, including tested versions. Agent Teams is only required for teammate mode. Install native Node 20+, native Claude CLI, authenticated Codex CLI and, on Windows, Windows PowerShell 5.1 with Add-Type support; install.ps1 also runs under PowerShell 7. Linux installation is described below.
 
 Run `node "$env:USERPROFILE/.claude/bridges/codex-bridge/doctor.js"` to verify the actual registered MCP command initializes and exposes `codex_turn`; use the documented alternate config path for an isolated install. The bounded check creates no model turn and does not verify Codex login or a particular Claude session’s tool loading. Restart Claude after installing; confirm the tool in that session and run a relay request.
 
+### Linux
+
+Use native Linux Node >=20 with npm, Claude CLI and Codex CLI on `PATH`, and POSIX `/bin/sh`. Neither installation nor the backend requires PowerShell. Under WSL, install Linux versions of the tools and use a checkout and state on the native Linux filesystem, for example under `$HOME`, rather than `/mnt/c` for verification.
+
+```sh
+# From the source checkout, also after git pull:
+sh install.sh --claude-config-dir "$HOME/Claude bridge config"
+# Use the same configuration when starting Claude or running diagnostics:
+CLAUDE_CONFIG_DIR="$HOME/Claude bridge config" claude
+CLAUDE_CONFIG_DIR="$HOME/Claude bridge config" node "$HOME/Claude bridge config/bridges/codex-bridge/doctor.js"
+# Deterministic tests from the source checkout, no model calls:
+npm --prefix bridge ci
+npm --prefix bridge test
+# Standalone installer integration test:
+node --test bridge/test/linux-install.test.js
+```
+
+Alternatively, set `CLAUDE_CONFIG_DIR` before `sh install.sh`; the argument takes precedence. With neither set, installation is under `~/.claude`, registration is in `~/.claude.json`, and default state is under `~/.claude/state/codex-bridge`. An explicit configuration puts registration in `<config>/.claude.json` and state in `<config>/state/codex-bridge`. To return to default configuration, unset the variable instead of setting it to `~/.claude`: Claude distinguishes those modes.
+
+Restart Claude after installing or updating. The installer copies managed sources including POSIX and Windows helpers and tests, runs `npm ci`, renders the agent with `claude-config.js`, and registers through Claude CLI. Updates do not transfer source `state`, `.state` or `node_modules` directories, delete unrelated destination files, or replace destination state. The installation directory must not overlap the source `bridge` directory.
+
+The Linux integration test runs the actual installer shell script and npm with a temporary HOME and configuration containing spaces, repeats an update, and checks preservation of state and other registrations. Its Claude CLI substitute only writes registration; subsequent MCP initialize/tools/list runs against the actual installed server. A Codex substitute rejects any invocation. This test does not verify authentication, a live model reply, or Claude relay behavior.
+
+Live verification requires authenticated CLIs and runs separately:
+
+```sh
+CODEX_BRIDGE_LIVE=1 npm --prefix bridge run smoke
+npm --prefix bridge run eval:relay -- --stub
+npm --prefix bridge run eval:relay -- --live-codex
+```
+
+Smoke checks actual Codex and continuity after restart; `--stub` uses actual Claude with a Codex substitute, while `--live-codex` uses both models. Passing installation or deterministic tests does not establish these live modes. Each run and credential availability require separate evidence.
+
+
+Verified on 2026-10-25 in Ubuntu 24.04 under WSL2 x86_64 (Linux 6.6.87.2), with checkout/state on its native Linux filesystem, native Linux Node 20.19.0 and 22.14.0, Codex CLI 0.155.1 and Claude CLI 2.1.126. A clean `npm ci` installed dependencies under Node 22.14.0; the same dependency tree passed the complete deterministic suite under both Node versions: 182 tests, 180 passed, 2 Windows-only tests skipped, 0 failed. Windows regression tests passed separately: 181 passed, 1 Linux-only test skipped.
+
+Actual Claude CLI registration and idempotent reinstallation completed real MCP discovery. On Node 22.14.0, the installed bridge's live Codex smoke preserved the thread/token across two bridge/App Server processes and verified cleanup. The complete authenticated Claude-to-Codex `--live-codex` evaluation also passed both turns: fresh Claude sessions and bridge processes, exactly one unchanged LF envelope per turn, exact replies, verified reply resources, preserved thread and recalled token, with process cleanup. This exercises main `--agent` print sessions using the rendered template and explicit MCP configuration; it does not prove installed agent discovery, nested subagents, interactive Agent Teams, SendMessage delivery or shutdown.
+
+A separate actual-Claude/stub-Codex adversarial-body probe called the relay once and returned the correct stub reply, but **failed envelope byte equality**: its header CRLF became LF and its final LF disappeared. A stream-JSON input probe reproduced that mismatch; changing input mode did not fix it. LLM copying remains best effort for both request and reply text. For exact input file contents use direct structured calls with `attachments` and optional SHA-256; for exact output use the immutable reply MCP resource. Neither the passing LF memory sample nor deterministic MCP tests guarantee lossless LLM copying of arbitrary envelopes. Other distributions, architectures, filesystems and non-WSL hosts were not exercised.
 ### Identity storage and upgrading the legacy layout
 
 State, transcript and lock filenames share `v2@<sha256 of exact conversation_id>` with `.json`, `.transcript.jsonl` and `.lock` suffixes. The hash uses UTF-8 without case conversion; `Review-A` and `review-a` are independent conversations even on Windows. State and new transcript entries retain the original `conversation_id`; a state mismatch returns `STATE_IDENTITY_MISMATCH` before calling Codex. To print the paths, run from the bridge directory:
@@ -281,4 +320,4 @@ npm run smoke
 Remove-Item Env:CODEX_BRIDGE_LIVE
 ```
 
-The live smoke uses existing Codex login, a temporary empty project/state directory, the `danger-full-access` sandbox, two separate bridge/App Server processes and 90-second per-operation limits. It checks remembered random text and the same persisted thread, then verifies native children and supervisors exited and the project stayed empty — emptiness is no longer enforced by the sandbox, only by both prompts writing nothing. It does not change user configuration. Verified on Windows with Node 24.12.0, originally against Codex 0.153.4 and re-run against 0.155.1 after the move to the full-access sandbox; this does not establish Claude relay/Agent Teams behavior or POSIX live compatibility.
+The live smoke uses existing Codex login, a temporary empty project/state directory, the `danger-full-access` sandbox, two separate bridge/App Server processes and 90-second per-operation limits. It checks remembered random text and the same persisted thread, then verifies native children and supervisors exited and the project stayed empty — emptiness is no longer enforced by the sandbox, only by both prompts writing nothing. It does not change user configuration. Verified on Windows with Node 24.12.0, originally against Codex 0.153.4 and re-run against 0.155.1 after the move to the full-access sandbox; that Windows check does not establish Claude relay/Agent Teams behavior. The separate Linux results and their limits are recorded in the Linux section above.

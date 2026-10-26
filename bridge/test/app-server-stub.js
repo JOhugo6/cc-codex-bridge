@@ -80,9 +80,10 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', (l
   const turn = { id: turnId, status: 'inProgress', items: [] };
   const scope = { threadId: p.threadId, turnId };
   if (last) { notify('item/completed', { ...last, item: { id: 'late', type: 'agentMessage', text: 'LATE GARBAGE', phase: 'final_answer' } }); }
-  notify('turn/started', { threadId: p.threadId, turn });
-  if (mode !== 'early-events') answer({ turn });
-  if (mode === 'hang') return;
+  if (mode === 'hang-before-id') return;
+  if (mode !== 'hang-response-only') notify('turn/started', { threadId: p.threadId, turn });
+  if (mode !== 'early-events' && mode !== 'hang-before-response') answer({ turn });
+  if (['hang', 'hang-before-response', 'hang-response-only'].includes(mode)) return;
   if (mode === 'disconnect') { process.exit(7); return; }
   if (mode === 'server-request') { send({ id: 'approval', method: 'item/commandExecution/requestApproval', params: scope }); return; }
   if (mode === 'wrong-thread') { notify('item/completed', { ...scope, threadId: 'wrong-thread', item: {} }); return; }

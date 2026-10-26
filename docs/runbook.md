@@ -14,10 +14,49 @@
 
 ## 1. Prerekvizity a kontrola připojení
 
-Nejdřív čti [režimy Claude, instalaci a diagnostiku](claude-modes.md). Rozlišují běžného subagenta, hlavní `--agent`, in-process i split-pane teammate a uvádějí testované verze. Agent Teams je nutný jen pro teammate. Potřebuješ nativní Node 20+, nativní Claude CLI, přihlášený Codex CLI a Windows PowerShell 5.1 s Add-Type; install.ps1 funguje i pod PowerShell 7.
+Nejdřív čti [režimy Claude, instalaci a diagnostiku](claude-modes.md). Rozlišují běžného subagenta, hlavní `--agent`, in-process i split-pane teammate a uvádějí testované verze. Agent Teams je nutný jen pro teammate. Potřebuješ nativní Node 20+, nativní Claude CLI, přihlášený Codex CLI a na Windows také Windows PowerShell 5.1 s Add-Type; install.ps1 funguje i pod PowerShell 7. Linux instalaci popisuje následující oddíl.
 
 Příkaz `node "$env:USERPROFILE/.claude/bridges/codex-bridge/doctor.js"` skutečně inicializuje registrovaný MCP příkaz a ověří nástroj `codex_turn`; pro izolovanou instalaci použij popsanou alternativní konfiguraci. Omezená kontrola nevytváří modelový tah, neověřuje login Codexu ani načtení nástroje v konkrétní session. Po instalaci restartuj Claude, ověř dostupnost nástroje v session a spusť relay požadavek.
 
+### Linux
+
+Na Linuxu používej nativní Node >=20 s npm, Claude CLI a Codex CLI v `PATH` a POSIX `/bin/sh`. Pro instalaci ani backend není potřeba PowerShell. V prostředí WSL instaluj Linux verze nástrojů a pro ověřování používej checkout a stav na nativním Linux filesystému, například pod `$HOME`, nikoli `/mnt/c`.
+
+```sh
+# Ze zdrojového checkoutu, také po git pull:
+sh install.sh --claude-config-dir "$HOME/Claude bridge config"
+# Stejný adresář při startu Claude i samostatné diagnostice:
+CLAUDE_CONFIG_DIR="$HOME/Claude bridge config" claude
+CLAUDE_CONFIG_DIR="$HOME/Claude bridge config" node "$HOME/Claude bridge config/bridges/codex-bridge/doctor.js"
+# Deterministické testy ze zdrojového checkoutu, bez modelových volání:
+npm --prefix bridge ci
+npm --prefix bridge test
+# Samostatný integrační test instalátoru:
+node --test bridge/test/linux-install.test.js
+```
+
+Alternativně nastav `CLAUDE_CONFIG_DIR` před `sh install.sh`; argument má přednost. Bez obou je instalace pod `~/.claude`, registrace v `~/.claude.json` a výchozí stav pod `~/.claude/state/codex-bridge`. Explicitní konfigurace přesouvá registraci do `<config>/.claude.json` a stav do `<config>/state/codex-bridge`. Pro návrat k výchozí konfiguraci proměnnou odstraň, nenastavuj ji jen na `~/.claude`: Claude tyto režimy rozlišuje.
+
+Po instalaci nebo aktualizaci restartuj Claude. Instalátor kopíruje spravované zdroje včetně POSIX a Windows helperů a testů, provede `npm ci`, vykreslí agenta přes `claude-config.js` a zaregistruje server přes Claude CLI. Aktualizace nepřenáší zdrojové adresáře `state`, `.state` nebo `node_modules`, nemaže nesouvisející cílové soubory a zachová cílový stav. Instalační adresář se nesmí překrývat se zdrojovým `bridge`.
+
+Linux integrační test spouští skutečný instalační shell skript a npm v dočasném HOME a konfiguraci s mezerami, opakuje aktualizaci a kontroluje zachování stavu i ostatních registrací. Claude CLI je v tomto testu náhrada pouze pro zápis registrace; následné MCP initialize/tools/list běží proti skutečně nainstalovanému serveru. Codex náhrada odmítne jakékoli spuštění. Tento test neověřuje přihlášení ani živou odpověď modelu nebo chování Claude relaye.
+
+Živé ověření vyžaduje přihlášené CLI a spouští se odděleně:
+
+```sh
+CODEX_BRIDGE_LIVE=1 npm --prefix bridge run smoke
+npm --prefix bridge run eval:relay -- --stub
+npm --prefix bridge run eval:relay -- --live-codex
+```
+
+Smoke ověřuje skutečný Codex a kontinuitu po restartu; `--stub` používá skutečný Claude s náhradou Codexu, `--live-codex` oba modely. Samotný úspěch instalátoru nebo deterministické sady není dokladem těchto živých režimů. Konkrétní běh a dostupnost přihlášení musí být doloženy samostatně.
+
+
+Ověřeno 25. 10. 2026 v Ubuntu 24.04 pod WSL2 x86_64 (Linux 6.6.87.2), s checkoutem a stavem na nativním linuxovém filesystému, nativním Linux Node 20.19.0 a 22.14.0, Codex CLI 0.155.1 a Claude CLI 2.1.126. Čisté `npm ci` nainstalovalo závislosti pod Node 22.14.0; stejný strom závislostí prošel celou deterministickou sadou pod oběma verzemi Node: 182 testů, 180 úspěšných, 2 přeskočené Windows testy, 0 selhání. Windows regresní sada prošla samostatně: 181 úspěšných, 1 přeskočený Linux test.
+
+Registrace přes skutečný Claude CLI a opakovaná instalace dokončily skutečné MCP discovery. Na Node 22.14.0 živý Codex smoke z nainstalovaného bridge zachoval vlákno a token přes dva procesy bridge/App Server a ověřil úklid. Celý přihlášený Claude-to-Codex eval `--live-codex` prošel oběma tahy: nové Claude session a procesy bridge, právě jedna nezměněná LF obálka na tah, přesné odpovědi, ověřené reply resources, stejné vlákno i vybavený token a úklid procesů. Jde o hlavní `--agent` print session s vykreslenou šablonou a explicitní MCP konfigurací; neověřuje to vyhledání nainstalovaného agenta, vnořené subagenty, interaktivní Agent Teams, doručení přes SendMessage ani shutdown.
+
+Samostatný test skutečného Claude s náhradou Codexu a útočnými instrukcemi v těle zavolal relay právě jednou a vrátil správnou stub odpověď, ale **selhal v bajtové shodě obálky**: CRLF hlavičky se změnilo na LF a zmizelo koncové LF. Stejný rozdíl zopakoval vstup přes stream JSON; změna vstupního režimu jej neopravila. Kopírování požadavků i odpovědí pomocí LLM zůstává best effort. Pro přesný obsah vstupních souborů použij přímé strukturované volání s `attachments` a volitelným SHA-256, pro přesný výstup neměnný MCP reply resource. Úspěšný paměťový vzorek s LF ani deterministické MCP testy nezaručují bezeztrátové kopírování libovolné obálky modelem. Jiné distribuce, architektury, filesystémy a hosty mimo WSL jsme nezkoušeli.
 ### Uložení identity a přechod ze starého formátu
 
 Stav, transcript a zámek používají společný název `v2@<sha256 přesného conversation_id>` s příponami `.json`, `.transcript.jsonl` a `.lock`. Hash se počítá z UTF-8 bez změny velikosti písmen; `Review-A` a `review-a` jsou dvě samostatné konverzace i na Windows. Stav i nové řádky transcriptu obsahují původní `conversation_id`; při neshodě stavu bridge vrátí `STATE_IDENTITY_MISMATCH` bez volání Codexu. Pro vypsání cest spusť v adresáři bridge:
@@ -281,4 +320,4 @@ npm run smoke
 Remove-Item Env:CODEX_BRIDGE_LIVE
 ```
 
-Živý smoke používá stávající přihlášení Codexu, dočasný prázdný projekt/stav, sandbox `danger-full-access`, dva samostatné procesy bridge/App Server a limit 90 sekund na operaci. Ověří zapamatovaný náhodný text a stejné uložené vlákno, poté zánik nativních child procesů i supervisorů a prázdný projekt — prázdnota už ale není vynucena sandboxem, jen tím, že oba prompty nic nezapisují. Uživatelskou konfiguraci nemění. Ověřeno na Windows s Node 24.12.0, původně s Codexem 0.153.4 a znovu s 0.155.1 po přechodu na full-access sandbox; nejde o ověření Claude relay/Agent Teams ani živého POSIX prostředí.
+Živý smoke používá stávající přihlášení Codexu, dočasný prázdný projekt/stav, sandbox `danger-full-access`, dva samostatné procesy bridge/App Server a limit 90 sekund na operaci. Ověří zapamatovaný náhodný text a stejné uložené vlákno, poté zánik nativních child procesů i supervisorů a prázdný projekt — prázdnota už ale není vynucena sandboxem, jen tím, že oba prompty nic nezapisují. Uživatelskou konfiguraci nemění. Ověřeno na Windows s Node 24.12.0, původně s Codexem 0.153.4 a znovu s 0.155.1 po přechodu na full-access sandbox; toto Windows ověření nepotvrzuje Claude relay/Agent Teams. Samostatné Linux výsledky a jejich limity uvádí oddíl Linux výše.

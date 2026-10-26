@@ -26,7 +26,20 @@ function setup(t, mode = 'normal', options = {}) {
   return { dir, project, config, backend, wire };
 }
 const exact = '  žluťoučký 😀\r\n```diff\r\n+ exact\t \r\n```\r\n';
-function dead(pid) { assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }); }
+async function dead(pid) {
+  if (process.platform === 'linux') {
+    // The supervisor and its group receive SIGKILL together. Its close event can
+    // precede a descendant's signal delivery or orphan reaping. Yield until the
+    // OS confirms ESRCH, using the same 1500ms bound as transport shutdown.
+    const end = performance.now() + 1500;
+    while (performance.now() < end) {
+      try { process.kill(pid, 0); }
+      catch (err) { if (err.code === 'ESRCH') break; throw err; }
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+}
 async function until(check) {
   const end = Date.now() + 15000;
   while (!check()) {
@@ -50,7 +63,7 @@ for (const mode of ['normal', 'early-events', 'terminal-items-only', 'event-item
 test('persisted threads resume across backend/process restart; no new thread is created', async (t) => {
   const env = setup(t); const first = env.backend();
   const out = await first.startSession('private token', { cwd: env.project });
-  await first.close(); dead(env.wire()[0].pid);
+  await first.close(); await dead(env.wire()[0].pid);
   const next = env.backend();
   assert.deepEqual(await next.continueSession(out.threadId, 'recall'), { threadId: out.threadId, content: 'private token' });
   assert.equal(env.wire().filter((x) => x.method === 'thread/start').length, 1);
@@ -68,7 +81,7 @@ for (const [mode, code] of [
   test(`JSONL ${mode}: fail explicitly and reap child`, async (t) => {
     const env = setup(t, mode); const b = env.backend();
     await assert.rejects(b.startSession('test', { cwd: env.project }), { code });
-    dead(env.wire()[0].pid);
+    await dead(env.wire()[0].pid);
   });
 }
 
@@ -76,7 +89,7 @@ for (const mode of ['silent-init', 'bad-init', 'invalid-json']) {
   test(`JSONL ${mode}: bounded failed handshake cleans parent and descendant`, async (t) => {
     const env = setup(t, mode, { readinessTimeoutMs: 10000, descendant: true });
     await assert.rejects(env.backend().startSession('test'), { code: 'BACKEND_NOT_READY' });
-    for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
+    for (const row of env.wire()) { if (row.pid) await dead(row.pid); if (row.descendantPid) await dead(row.descendantPid); }
   });
 }
 
@@ -86,7 +99,7 @@ test('turn timeout sends interrupt, reaps tree and reconnects without retrying u
   await b._serial(async () => {});
   await assert.rejects(b.startSession('test', { cwd: env.project, timeoutMs: 300 }), { code: 'TIMEOUT' });
   assert.equal(env.wire().filter((x) => x.method === 'turn/interrupt').length, 1);
-  for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
+  for (const row of env.wire()) { if (row.pid) await dead(row.pid); if (row.descendantPid) await dead(row.descendantPid); }
   env.config('normal');
   assert.equal((await b.continueSession('thread-1', 'recall')).content, 'test');
   assert.equal(env.wire().filter((x) => x.method === 'thread/start').length, 1);
@@ -98,19 +111,47 @@ test('AbortSignal cancels active turn and queued abort never starts another turn
   const a = b.startSession('first', { signal: first.signal });
   const c = b.startSession('queued', { signal: second.signal });
   const checks = [assert.rejects(a, { code: 'CANCELLED' }), assert.rejects(c, { code: 'CANCELLED' })];
-  await until(() => fs.existsSync(path.join(env.dir, 'threads.json')) && env.wire().some((x) => x.method === 'turn/start'));
+  await until(() => b._transport?.activeTurn?.turnId || b._transport?.activeTurn?.startedTurnId);
   second.abort(); first.abort();
   await Promise.all(checks);
   assert.equal(env.wire().filter((x) => x.method === 'turn/start').length, 1);
   assert.equal(env.wire().filter((x) => x.method === 'turn/interrupt').length, 1);
 });
 
+for (const mode of ['hang-before-id', 'hang-before-response', 'hang-response-only']) {
+  test(`cancellation at ${mode}: interrupt identified turn and reap the owned tree`, async (t) => {
+    const env = setup(t, mode, { descendant: true }); const b = env.backend();
+    const abort = new AbortController();
+    const rejected = assert.rejects(b.startSession('cancel once', { signal: abort.signal }), { code: 'CANCELLED' });
+    if (mode === 'hang-before-id') {
+      // This mode withholds both identity-bearing outputs, so receipt is enough
+      // to prove a real turn started while its identity is still unavailable.
+      await until(() => fs.existsSync(path.join(env.dir, 'wire.jsonl')) && env.wire().some((x) => x.method === 'turn/start'));
+      assert.equal(b._transport.activeTurn.turnId, null);
+      assert.equal(b._transport.activeTurn.startedTurnId, null);
+    } else if (mode === 'hang-before-response') {
+      await until(() => b._transport?.activeTurn?.startedTurnId);
+      assert.equal(b._transport.activeTurn.turnId, null, 'response is withheld until cancellation');
+    } else {
+      await until(() => b._transport?.activeTurn?.turnId);
+      assert.equal(b._transport.activeTurn.startedTurnId, null, 'notification is withheld');
+    }
+    abort.abort(); await rejected;
+    const interrupts = env.wire().filter((x) => x.method === 'turn/interrupt');
+    assert.deepEqual(interrupts.map((x) => x.params), mode === 'hang-before-id' ? [] : [{ threadId: 'thread-1', turnId: 'turn-1' }]);
+    for (const row of env.wire()) { if (row.pid) await dead(row.pid); if (row.descendantPid) await dead(row.descendantPid); }
+    env.config('normal');
+    assert.equal((await b.continueSession('thread-1', 'recall')).content, 'cancel once');
+    assert.equal(env.wire().filter((x) => x.method === 'thread/start').length, 1);
+  });
+}
+
 test('concurrent callers serialize complete turns; close reaps child and permanently rejects new calls', async (t) => {
   const env = setup(t, 'delay', { descendant: true }); const b = env.backend();
   const outputs = await Promise.all(['a', 'b', 'c'].map((prompt) => b.startSession(prompt)));
   assert.equal(new Set(outputs.map((x) => x.threadId)).size, 3);
   await b.close();
-  for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
+  for (const row of env.wire()) { if (row.pid) await dead(row.pid); if (row.descendantPid) await dead(row.descendantPid); }
   await assert.rejects(b.startSession('closed'), { code: 'BACKEND_CLOSED' });
 });
 
@@ -201,7 +242,7 @@ test('verified legacy cwd binding remains recoverable after state persistence fa
 });
 
 test('real MCP cancellation interrupts native transport; stdio close reaps native child', async (t) => {
-  const env = setup(t, 'hang');
+  const env = setup(t, 'hang-before-response');
   const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
   const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
   const transport = new StdioClientTransport({ command: process.execPath,
@@ -214,7 +255,7 @@ test('real MCP cancellation interrupts native transport; stdio close reaps nativ
   const signal = new AbortController();
   const call = client.callTool({ name: 'codex_turn', arguments: { conversation_id: 'cancelled', message: 'wait' } }, undefined, { signal: signal.signal });
   const rejection = assert.rejects(call);
-  await until(() => fs.existsSync(path.join(env.dir, 'wire.jsonl')) && env.wire().some((x) => x.method === 'turn/start'));
+  await until(() => fs.existsSync(path.join(env.dir, 'turn-ready')));
   signal.abort(); await rejection;
   await until(() => env.wire().some((x) => x.method === 'turn/interrupt'));
   await until(() => { try { process.kill(env.wire()[0].pid, 0); return false; } catch (err) { return err.code === 'ESRCH'; } });
@@ -231,7 +272,7 @@ test('unexpected native parent exit reaps surviving detached Windows / inherited
   const env = setup(t, 'disconnect', { descendant: true }); const b = env.backend();
   await assert.rejects(b.startSession('crash'), { code: 'BACKEND_DISCONNECTED' });
   await b.close();
-  for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
+  for (const row of env.wire()) { if (row.pid) await dead(row.pid); if (row.descendantPid) await dead(row.descendantPid); }
 });
 
 test('supervisor termination closes the Windows job / escalates the owned POSIX group', async (t) => {
@@ -242,7 +283,7 @@ test('supervisor termination closes the Windows job / escalates the owned POSIX 
   // Windows kill-on-close must work even when the owner cannot run any cleanup code.
   b._transport.child.kill(process.platform === 'win32' ? 'SIGKILL' : 'SIGTERM');
   await rejected; await b.close();
-  for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
+  for (const row of env.wire()) { if (row.pid) await dead(row.pid); if (row.descendantPid) await dead(row.descendantPid); }
 });
 
 test('raw MCP stdin EOF exits bridge and owned child tree without client-side kill', async (t) => {
@@ -270,7 +311,7 @@ test('raw MCP stdin EOF exits bridge and owned child tree without client-side ki
   await until(() => child.exitCode !== null);
   assert.equal(child.exitCode, 0);
   assert.match(diagnostics, /shutting down on stdin EOF/);
-  for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
+  for (const row of env.wire()) { if (row.pid) await dead(row.pid); if (row.descendantPid) await dead(row.descendantPid); }
 });
 
 test('per-call timeout overrides the instance default in both directions', async (t) => {
@@ -281,7 +322,7 @@ test('per-call timeout overrides the instance default in both directions', async
   const started = Date.now();
   await assert.rejects(b.startSession('test', { cwd: env.project, timeoutMs: 900 }), { code: 'TIMEOUT' });
   assert.ok(Date.now() - started < 60000, 'the per-call budget, not the instance default, bounded the call');
-  for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
+  for (const row of env.wire()) { if (row.pid) await dead(row.pid); if (row.descendantPid) await dead(row.descendantPid); }
 
   // A long per-call budget must not shorten a healthy turn that finishes well inside it.
   env.config('normal');
@@ -310,7 +351,7 @@ for (const mode of ['unsubscribe-error', 'unsubscribe-hang', 'unsubscribe-discon
     assert.equal(out.reply, exact);
     assert.equal((await operations.load('cleanup')).operations[0].status, 'completed');
     assert.equal(env.wire().filter((x) => x.method === 'thread/unsubscribe').length, 1);
-    for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
+    for (const row of env.wire()) { if (row.pid) await dead(row.pid); if (row.descendantPid) await dead(row.descendantPid); }
     const calls = env.wire().length;
     assert.deepEqual(await bridge.turn('cleanup', 'remember', { request_id: 'r1', working_dir: env.project }), out);
     assert.equal(env.wire().length, calls, 'redelivery must not replay inference or cleanup');
@@ -332,7 +373,7 @@ test('completed inference survives its original timeout and cancellation during 
   abort.abort();
   const next = b.continueSession('thread-1', 'recall');
   assert.equal((await out).content, exact);
-  const firstPid = env.wire()[0].pid; dead(firstPid);
+  const firstPid = env.wire()[0].pid; await dead(firstPid);
   assert.equal((await next).content, 'memory');
   assert.equal(env.wire().filter((x) => x.method === 'turn/interrupt').length, 0);
   assert.equal(env.wire().filter((x) => x.method === 'thread/unsubscribe').length, 2);
@@ -349,7 +390,7 @@ test('finite default counts resumes and new threads, excludes metadata reads, an
     assert.equal(env.wire().filter((x) => x.method === 'initialize').length, 1);
   }
   assert.equal(b._transport, null, 'eighth load retires immediately even with successful unsubscribe');
-  for (const row of env.wire()) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
+  for (const row of env.wire()) { if (row.pid) await dead(row.pid); if (row.descendantPid) await dead(row.descendantPid); }
   const outputs = await Promise.all([
     ...Array.from({ length: 7 }, (_, i) => b.startSession(`conversation ${i}`)),
     b.continueSession(first.threadId, 'recall'),
@@ -361,7 +402,7 @@ test('finite default counts resumes and new threads, excludes metadata reads, an
   const wire = env.wire();
   assert.equal(wire.filter((x) => x.method === 'initialize').length, 2);
   assert.equal(wire.filter((x) => x.method === 'thread/unsubscribe').length, 16);
-  for (const row of wire) { if (row.pid) dead(row.pid); if (row.descendantPid) dead(row.descendantPid); }
+  for (const row of wire) { if (row.pid) await dead(row.pid); if (row.descendantPid) await dead(row.descendantPid); }
   const turnMethods = wire.filter((x) => ['thread/start', 'thread/resume', 'turn/start', 'thread/unsubscribe'].includes(x.method));
   for (let i = 0; i < turnMethods.length; i += 3) {
     assert.ok(['thread/start', 'thread/resume'].includes(turnMethods[i].method));
@@ -411,7 +452,7 @@ test('late unwind of a timed-out action cannot clear the successor active turn',
   await entered; await first; patch.mock.restore();
   const abort = new AbortController();
   const second = assert.rejects(b.startSession('new', { signal: abort.signal }), { code: 'CANCELLED' });
-  await until(() => env.wire().some((x) => x.method === 'turn/start'));
+  await until(() => b._transport?.activeTurn?.turnId || b._transport?.activeTurn?.startedTurnId);
   unblock(); await attempted;
   abort.abort(); await second;
   assert.equal(env.wire().filter((x) => x.method === 'turn/interrupt').length, 1);

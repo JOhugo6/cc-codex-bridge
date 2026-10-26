@@ -145,8 +145,10 @@ test('invalid MCP envelopes/arguments/unknown tools fail before disk or backend 
     await fsp.rm(dir, { recursive: true, force: true });
   });
   const envelope = 'CONV_ID: a\nx';
+  await client.listTools();
   const cases = [
-    {}, { envelope: null }, { envelope: 'preamble\nCONV_ID: a\nx' },
+    {}, { conversation_id: 'a' }, { message: 'x' },
+    { envelope: null }, { envelope: 'preamble\nCONV_ID: a\nx' },
     { envelope: '\r\nCONV_ID: a\nx' }, { envelope: 'CONV_ID: a\n' },
     { envelope: 'CONV_ID: a; UNKNOWN: r\nx' },
     { envelope: 'CONV_ID: a; REQUEST_ID: r; REQUEST_ID: r\nx' },
@@ -193,25 +195,39 @@ test('codex_turn tool is listed with the correct input/output schema', async (t)
   assert.ok(tool, 'codex_turn tool must be exposed');
 
   assert.equal(tool.inputSchema.type, 'object');
-  assert.equal(tool.inputSchema.oneOf.length, 2, 'two exclusive input paths');
-  const raw = tool.inputSchema.oneOf.find((schema) => schema.properties.envelope);
-  const structured = tool.inputSchema.oneOf.find((schema) => schema.properties.conversation_id);
-  assert.deepEqual(raw.required, ['envelope']);
-  assert.equal(raw.additionalProperties, false);
-  assert.equal(structured.additionalProperties, false);
-  const props = structured.properties;
+  for (const keyword of ['oneOf', 'allOf', 'anyOf']) {
+    assert.ok(!Object.hasOwn(tool.inputSchema, keyword), `Claude rejects top-level ${keyword}`);
+  }
+  assert.equal(tool.inputSchema.additionalProperties, false);
+  // Neither mode's fields may be globally required: envelope-only and structured
+  // calls must both reach the unchanged server validator.
+  assert.deepEqual(tool.inputSchema.required || [], []);
+  assert.match(tool.inputSchema.description, /envelope alone/);
+  assert.match(tool.inputSchema.description, /conversation_id and message/);
+  const props = tool.inputSchema.properties;
+  assert.equal(props.envelope.type, 'string');
   assert.ok(props.conversation_id, 'has conversation_id');
   assert.ok(props.message, 'has message');
   assert.ok(props.request_id, 'has optional request_id');
   assert.ok(props.attachments, 'has optional attachments only in structured mode');
-  assert.ok(!raw.properties.attachments, 'opaque envelope remains unchanged');
   assert.equal(props.attachments.items.additionalProperties, false);
-  assert.ok(!structured.required.includes('attachments'));
-  assert.deepEqual(
-    [...structured.required].sort(),
-    ['conversation_id', 'message'],
-    'both inputs required'
-  );
+  assert.equal(props.attachments.type, 'array');
+  assert.equal(props.timeout_ms.type, 'integer');
+  assert.ok(props.timeout_ms.minimum > 0);
+  assert.ok(props.timeout_ms.maximum >= props.timeout_ms.minimum);
+  // Exercise the real listed tool in both modes, with byte-sensitive body text.
+  const body = '\r\n  literal 😀\t\n';
+  const rawResult = await client.callTool({ name: tool.name, arguments: {
+    envelope: `CONV_ID: Schema-Modes\n${body}`,
+  } });
+  assert.notEqual(rawResult.isError, true);
+  assert.equal(rawResult.structuredContent.reply, `started: ${body}`);
+  const structuredResult = await client.callTool({ name: tool.name, arguments: {
+    conversation_id: 'Schema-Modes', message: body,
+  } });
+  assert.notEqual(structuredResult.isError, true);
+  assert.equal(structuredResult.structuredContent.thread_id, rawResult.structuredContent.thread_id);
+  assert.equal(structuredResult.structuredContent.turn, 2);
   // Output schema advertises reply/thread_id/turn.
   assert.ok(tool.outputSchema, 'has outputSchema');
   const out = tool.outputSchema.properties;
@@ -233,7 +249,7 @@ test('real MCP structured attachments deliver whole literal-byte members, valida
   // then validates structuredContent against it as well as server outputSchema.parse.
   const { tools } = await connection.client.listTools();
   const tool = tools.find((entry) => entry.name === 'codex_turn');
-  assert.equal(tool.inputSchema.oneOf.length, 2);
+  assert.equal(tool.inputSchema.properties.attachments.type, 'array');
   const literal = Buffer.from([0xef, 0xbb, 0xbf, 0x61, 0x0d, 0x0a, 0x62, 0x0d, 0x63, 0x0a,
     0x00, 0xc4, 0x8d, 0xe6, 0x96, 0xb0, 0xf0, 0x9f, 0x98, 0x80]);
   const bytes = Buffer.concat([literal, Buffer.from('m'.repeat(200097) + '{{attachment:unknown}}')]);
@@ -392,10 +408,9 @@ test('working_dir: tool schema lists working_dir as optional and a turn with it 
   const { tools } = await client.listTools();
   const tool = tools.find((x) => x.name === 'codex_turn');
   assert.ok(tool, 'codex_turn must exist');
-  const structured = tool.inputSchema.oneOf.find((schema) => schema.properties.conversation_id);
-  const props = structured.properties;
+  const props = tool.inputSchema.properties;
   assert.ok(props.working_dir, 'working_dir must appear in input schema properties');
-  const required = structured.required || [];
+  const required = tool.inputSchema.required || [];
   assert.ok(!required.includes('working_dir'), 'working_dir must NOT be required');
 
   // 2. A turn with working_dir succeeds and returns the normal structuredContent shape.
